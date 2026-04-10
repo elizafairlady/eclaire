@@ -1,0 +1,6 @@
+name: openclaw-researcher
+description: Research agent for OpenClaw project - investigating architecture, purpose, implementation, and community
+role: research
+model: frontier
+tools:
+  - web_search

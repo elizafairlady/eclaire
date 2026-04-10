@@ -1,0 +1,6 @@
+name: crush-researcher
+description: Research agent for Crush by charmbracelet - investigating architecture, purpose, implementation, and community
+role: research
+model: frontier
+tools:
+  - web_search
