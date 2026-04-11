@@ -68,12 +68,12 @@ ecl run -a coding "Write a game in python with pygame in /tmp/test-game using uv
 
 Before building new features, fix what exists but doesn't work.
 
-- [ ] Remove Scheduler, keep only JobExecutor
+- [x] Remove Scheduler, keep only JobExecutor
   - Reference: `docs/reference/openclaw-scheduling.md`
   - Audit: `docs/audit/eclaire-scheduling.md`
-- [ ] Migrate heartbeat tasks to Jobs (kind: "every")
-- [ ] Migrate cron entries to Jobs (kind: "cron")
-- [ ] Keep BOOT.md as special startup job
+- [x] Migrate heartbeat tasks to Jobs (kind: "every") — auto-synced from HEARTBEAT.md on startup
+- [x] Migrate cron entries to Jobs (kind: "cron") — auto-migrated from cron.yaml on startup
+- [x] BOOT.md runs once per day via JobExecutor.RunBootIfNeeded
 - [x] Delete dead code: HeartbeatTask.Once, BackgroundResult.OneShot
 - [x] Fix context engine section ordering (use sort.Slice, not bubble sort)
 - [x] Fix context engine minimal mode whitelist (tightened to 7 sections)
@@ -90,11 +90,11 @@ Before building new features, fix what exists but doesn't work.
 
 ## Milestone 2: Main Session
 
-- [ ] Create main session on Gateway startup (GetOrCreateMain)
+- [x] Create main session on Gateway startup (GetOrCreateMain)
   - Reference: `docs/reference/openclaw-sessions.md`
   - Audit: `docs/audit/eclaire-sessions.md`
-- [ ] Main session survives gateway restarts (load from disk)
-- [ ] Heartbeat/job results route to main session as system events
+- [x] Main session survives gateway restarts (load from disk)
+- [x] Heartbeat/job results route to main session as system events (via SystemEventQueue)
 - [ ] TUI shows main session as always-accessible tab
 - [ ] `ecl run` with no project context connects to main session
 
@@ -102,23 +102,23 @@ Before building new features, fix what exists but doesn't work.
 
 ## Milestone 3: Project Sessions
 
-- [ ] Project root detection from CWD (look for `.eclaire/`, `.git/`)
+- [x] Project root detection from CWD (look for `.eclaire/`, `.git/`) — `detectProjectRoot()` in gateway.go
   - Reference: `docs/reference/openclaw-sessions.md`, `docs/reference/clawcode-session.md`
   - Audit: `docs/audit/eclaire-sessions.md`
-- [ ] TUI passes CWD to gateway on connect
-- [ ] Create or resume project session when connecting from project directory
-- [ ] Project workspace layer loaded from `<project_root>/.eclaire/workspace/`
+- [x] TUI passes CWD to gateway on connect — `ConnectWithCWD()` in client.go
+- [x] Create or resume project session when connecting from project directory
+- [~] Project workspace layer loaded from `<project_root>/.eclaire/workspace/` — loads from daemon CWD only, not per-connection
 - [ ] Main session sees awareness events from project sessions
 
 ---
 
 ## Milestone 4: Unified Scheduling
 
-- [ ] `eclaire_manage job_add` accepts all three schedule kinds (at/every/cron)
+- [x] `eclaire_manage job_add` accepts all three schedule kinds (at/every/cron)
   - Reference: `docs/reference/openclaw-scheduling.md`
   - Audit: `docs/audit/eclaire-scheduling.md`
-- [ ] `eclaire_manage job_remove`, `job_list`, `job_runs`, `job_run`
-- [ ] `ecl job add/remove/list/runs/run` CLI
+- [x] `eclaire_manage job_remove`, `job_list`, `job_runs`, `job_run`
+- [x] `ecl job add/remove/list/runs/run` CLI
 - [ ] Session target routing (main vs isolated)
 - [ ] Startup catchup for missed recurring jobs
 - [ ] Context message embedding at job creation time
@@ -129,27 +129,28 @@ Before building new features, fix what exists but doesn't work.
 
 ## Milestone 5: Permissions
 
-- [ ] Default PermissionMode changed from Allow to something that prompts
+- [x] Default PermissionMode is PermissionWriteOnly (prompts for dangerous tools)
   - Reference: `docs/reference/openclaw-permissions.md`, `docs/reference/clawcode-permissions.md`
   - Audit: `docs/audit/eclaire-permissions.md`
 - [ ] Config option for permission_mode in config.yaml
-- [ ] Approval dialog wired end-to-end (TUI shows prompt, user responds)
+- [x] Approval dialog wired end-to-end (TUI shows prompt, user responds) — via TypeEvent broadcast
 - [ ] Session stores approved command patterns (not just tool names)
 - [ ] "Allow once" / "allow for session" / "deny" options
-- [ ] Background jobs use pre-approved patterns (cannot wait for interactive approval)
+- [x] Background jobs use PermissionWriteOnly — create approval notifications and block
 - [ ] Persistent sessions maintain approvals across resumptions
 
 ---
 
 ## Milestone 6: Notification System
 
-- [ ] Cron/job completions create notifications
+- [x] Cron/job completions create notifications — JobExecutor creates notifications on completion
   - Reference: `docs/reference/openclaw-delivery.md`
   - Audit: `docs/audit/eclaire-notifications.md`
-- [ ] Heartbeat alerts create notifications (not routine OK)
+- [x] Heartbeat alerts create notifications (via heartbeat job completions)
 - [ ] TUI drains notifications on connect
 - [ ] Notification panel or indicator in TUI
-- [ ] `ecl notifications` CLI with filtering
+- [x] `ecl notifications` CLI exists with resolution actions
+- [ ] `ecl notifications` CLI filtering by severity/source/time
 - [ ] Live test: Test 1 (reminder → notification) passes
 
 ---

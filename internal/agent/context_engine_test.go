@@ -25,7 +25,7 @@ func TestContextEngineAssemble(t *testing.T) {
 		},
 	}
 
-	plan := engine.Assemble("test", ws, []string{"shell", "read", "write"}, 128000, "", PromptModeFull, nil, nil)
+	plan := engine.Assemble("test", ws, []string{"shell", "read", "write"}, 128000, "", PromptModeFull, nil, nil, nil)
 
 	if plan.SystemPrompt == "" {
 		t.Error("system prompt should not be empty")
@@ -55,7 +55,7 @@ func TestContextEngineAssembleEmpty(t *testing.T) {
 		Memory:  &Memory{Daily: make(map[string]string)},
 	}
 
-	plan := engine.Assemble("empty", ws, nil, 32000, "", PromptModeFull, nil, nil)
+	plan := engine.Assemble("empty", ws, nil, 32000, "", PromptModeFull, nil, nil, nil)
 
 	if plan.SystemPrompt == "" {
 		t.Error("should at least have runtime header")
@@ -76,7 +76,7 @@ func TestContextEngineSections(t *testing.T) {
 		Memory: &Memory{Daily: make(map[string]string)},
 	}
 
-	plan := engine.Assemble("test", ws, []string{"shell"}, 128000, "extra instructions", PromptModeFull, nil, nil)
+	plan := engine.Assemble("test", ws, []string{"shell"}, 128000, "extra instructions", PromptModeFull, nil, nil, nil)
 
 	// Check sections exist with correct priorities
 	found := make(map[string]int)
@@ -106,7 +106,7 @@ func TestContextEngineTokenBudget(t *testing.T) {
 		Memory:  &Memory{Daily: make(map[string]string)},
 	}
 
-	plan := engine.Assemble("test", ws, nil, 100000, "", PromptModeFull, nil, nil)
+	plan := engine.Assemble("test", ws, nil, 100000, "", PromptModeFull, nil, nil, nil)
 
 	if plan.Budget.ContextWindow != 100000 {
 		t.Errorf("ContextWindow = %d", plan.Budget.ContextWindow)
@@ -140,7 +140,7 @@ func TestContextEngineMemoryFullContent(t *testing.T) {
 		},
 	}
 
-	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeFull, nil, nil)
+	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeFull, nil, nil, nil)
 
 	// Memory should contain ALL lines — no arbitrary truncation
 	if strings.Contains(plan.SystemPrompt, "truncated") {
@@ -268,7 +268,7 @@ func TestAssembleMinimalMode(t *testing.T) {
 		},
 	}
 
-	plan := engine.Assemble("test", ws, []string{"shell", "read"}, 128000, "extra overrides", PromptModeMinimal, nil, nil)
+	plan := engine.Assemble("test", ws, []string{"shell", "read"}, 128000, "extra overrides", PromptModeMinimal, nil, nil, nil)
 
 	// Should include
 	if !strings.Contains(plan.SystemPrompt, "Runtime") {
@@ -312,7 +312,7 @@ func TestAssembleNoneMode(t *testing.T) {
 		Memory: &Memory{Daily: make(map[string]string)},
 	}
 
-	plan := engine.Assemble("test", ws, []string{"shell"}, 128000, "", PromptModeNone, nil, nil)
+	plan := engine.Assemble("test", ws, []string{"shell"}, 128000, "", PromptModeNone, nil, nil, nil)
 
 	if !strings.Contains(plan.SystemPrompt, "Claire") {
 		t.Error("none mode should contain Claire identity string")
@@ -339,7 +339,7 @@ func TestAssembleDefaultMode(t *testing.T) {
 	}
 
 	// Empty string should behave like full
-	plan := engine.Assemble("test", ws, nil, 128000, "", "", nil, nil)
+	plan := engine.Assemble("test", ws, nil, 128000, "", "", nil, nil, nil)
 
 	if !strings.Contains(plan.SystemPrompt, "User info here") {
 		t.Error("empty mode should include USER.md (full behavior)")
@@ -362,7 +362,7 @@ func TestMinimalModeSectionNames(t *testing.T) {
 		},
 	}
 
-	plan := engine.Assemble("test", ws, []string{"shell"}, 128000, "overrides", PromptModeMinimal, nil, nil)
+	plan := engine.Assemble("test", ws, []string{"shell"}, 128000, "overrides", PromptModeMinimal, nil, nil, nil)
 
 	names := make(map[string]bool)
 	for _, s := range plan.Sections {
@@ -396,7 +396,7 @@ func TestBootstrapFileTruncation(t *testing.T) {
 		Memory: &Memory{Daily: make(map[string]string)},
 	}
 
-	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeFull, nil, nil)
+	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeFull, nil, nil, nil)
 
 	if !strings.Contains(plan.SystemPrompt, "[truncated at 20k chars]") {
 		t.Error("should truncate SOUL.md at 20k chars")
@@ -435,7 +435,7 @@ func TestBootstrapTotalLimit(t *testing.T) {
 		},
 	}
 
-	plan := engine.Assemble("test", ws, []string{"shell"}, 128000, strings.Repeat("v", MaxFileChars), PromptModeFull, nil, nil)
+	plan := engine.Assemble("test", ws, []string{"shell"}, 128000, strings.Repeat("v", MaxFileChars), PromptModeFull, nil, nil, nil)
 
 	// Count total chars across sections
 	totalChars := 0
@@ -471,7 +471,7 @@ func TestStandingOrders(t *testing.T) {
 		Memory:  &Memory{Daily: make(map[string]string)},
 	}
 
-	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeFull, nil, nil)
+	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeFull, nil, nil, nil)
 
 	if !strings.Contains(plan.SystemPrompt, "Always use Go 1.26") {
 		t.Error("should contain first standing order")
@@ -515,7 +515,7 @@ func TestStandingOrdersInMinimalMode(t *testing.T) {
 		Memory:  &Memory{Daily: make(map[string]string)},
 	}
 
-	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeMinimal, nil, nil)
+	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeMinimal, nil, nil, nil)
 
 	if !strings.Contains(plan.SystemPrompt, "Persistent rule") {
 		t.Error("standing orders should be included in minimal mode")
@@ -534,7 +534,7 @@ func TestHeartbeatSection(t *testing.T) {
 	}
 
 	// Full mode should include heartbeat
-	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeFull, nil, nil)
+	plan := engine.Assemble("test", ws, nil, 128000, "", PromptModeFull, nil, nil, nil)
 	if !strings.Contains(plan.SystemPrompt, "Check system health") {
 		t.Error("full mode should include HEARTBEAT.md")
 	}
@@ -550,7 +550,7 @@ func TestHeartbeatSection(t *testing.T) {
 	}
 
 	// Minimal mode should exclude heartbeat
-	plan = engine.Assemble("test", ws, nil, 128000, "", PromptModeMinimal, nil, nil)
+	plan = engine.Assemble("test", ws, nil, 128000, "", PromptModeMinimal, nil, nil, nil)
 	if strings.Contains(plan.SystemPrompt, "Check system health") {
 		t.Error("minimal mode should NOT include HEARTBEAT.md")
 	}

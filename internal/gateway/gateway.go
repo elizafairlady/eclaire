@@ -32,10 +32,10 @@ type Gateway struct {
 	sessions      *persist.SessionStore
 	mainSessionID string
 	router        *provider.Router
-	tools     *tool.Registry
-	runner    *agent.Runner
-	scheduler *agent.Scheduler
-	tasks     *agent.TaskRegistry
+	tools      *tool.Registry
+	runner     *agent.Runner
+	workspaces *agent.WorkspaceLoader
+	tasks      *agent.TaskRegistry
 	flows     *agent.FlowExecutor
 	jobStore      *agent.JobStore
 	jobExecutor   *agent.JobExecutor
@@ -270,13 +270,6 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	toolReg.Register(tool.TaskStatusTool(sessionStore))
 	toolReg.Register(tool.SessionReadTool(sessionStore))
 
-	// Create scheduler
-	heartbeatInterval := cfg.Merged().Gateway.HeartbeatInterval
-	if heartbeatInterval == "" {
-		heartbeatInterval = "30m"
-	}
-	sched := agent.NewScheduler(runner, workspaces, registry, msgBus, logger, heartbeatInterval, cfg.CronPath(), cfg.HeartbeatDir())
-
 	// Create unified job store, run log, notifications, and job executor
 	jobStore, err := agent.NewJobStore(cfg.JobsPath())
 	if err != nil {
@@ -336,22 +329,43 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		logger.Warn("failed to ensure dreaming jobs", "err", err)
 	}
 
-	// Register briefing tool now that scheduler exists
+	// Migrate legacy cron.yaml entries to unified job store
+	if migrated := jobExec.MigrateLegacyCron(cfg.CronPath()); migrated > 0 {
+		logger.Info("migrated legacy cron entries", "count", migrated)
+	}
+
+	// Sync HEARTBEAT.md tasks to job store
+	if err := jobExec.SyncHeartbeatJobs(workspaces); err != nil {
+		logger.Warn("failed to sync heartbeat jobs", "err", err)
+	}
+
+	// Register briefing tool — CronList pulls from unified job store
 	toolReg.Register(tool.BriefingTool(tool.BriefingDeps{
 		Reminders:    reminderStore,
 		WorkspaceDir: cfg.WorkspaceDir(),
 		BriefingsDir: cfg.BriefingsDir(),
 		CronList: func() []tool.CronEntry {
-			entries := sched.Entries()
-			out := make([]tool.CronEntry, len(entries))
-			for i, e := range entries {
-				out[i] = tool.CronEntry{ID: e.ID, Schedule: e.Schedule, AgentID: e.AgentID, Prompt: e.Prompt, Enabled: e.Enabled}
+			var out []tool.CronEntry
+			for _, j := range jobStore.List() {
+				if !j.Enabled {
+					continue
+				}
+				schedule := ""
+				switch j.Schedule.Kind {
+				case agent.ScheduleCron:
+					schedule = j.Schedule.Expr
+				case agent.ScheduleEvery:
+					schedule = "every " + j.Schedule.Every
+				case agent.ScheduleAt:
+					schedule = "at " + j.Schedule.At
+				}
+				out = append(out, tool.CronEntry{ID: j.ID, Schedule: schedule, AgentID: j.AgentID, Prompt: j.Prompt, Enabled: j.Enabled})
 			}
 			return out
 		},
 	}))
 
-	// Register eclaire_manage tool — reload closure captures registry + scheduler
+	// Register eclaire_manage tool — reload closure captures registry
 	reloadFn := func() tool.ReloadResult {
 		result := tool.ReloadResult{}
 		agents, err := agent.LoadAgentsDir(cfg.AgentsDir())
@@ -366,12 +380,12 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 				}
 			}
 		}
-		n, err := sched.ReloadCron()
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("reload cron: %v", err))
+		// Re-sync heartbeat jobs on reload
+		if syncErr := jobExec.SyncHeartbeatJobs(workspaces); syncErr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("sync heartbeat: %v", syncErr))
 		}
-		result.CronEntries = n
-		logger.Info("reload complete", "agents", result.AgentsLoaded, "cron", result.CronEntries)
+		result.CronEntries = jobStore.Count()
+		logger.Info("reload complete", "agents", result.AgentsLoaded, "jobs", result.CronEntries)
 		return result
 	}
 	// Active flow runs tracked in memory for status queries
@@ -387,10 +401,21 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		CronPath:  cfg.CronPath(),
 		Reload:    reloadFn,
 		CronList: func() []tool.CronEntry {
-			entries := sched.Entries()
-			out := make([]tool.CronEntry, len(entries))
-			for i, e := range entries {
-				out[i] = tool.CronEntry{ID: e.ID, Schedule: e.Schedule, AgentID: e.AgentID, Prompt: e.Prompt, Enabled: e.Enabled}
+			var out []tool.CronEntry
+			for _, j := range jobStore.List() {
+				if !j.Enabled {
+					continue
+				}
+				schedule := ""
+				switch j.Schedule.Kind {
+				case agent.ScheduleCron:
+					schedule = j.Schedule.Expr
+				case agent.ScheduleEvery:
+					schedule = "every " + j.Schedule.Every
+				case agent.ScheduleAt:
+					schedule = "at " + j.Schedule.At
+				}
+				out = append(out, tool.CronEntry{ID: j.ID, Schedule: schedule, AgentID: j.AgentID, Prompt: j.Prompt, Enabled: j.Enabled})
 			}
 			return out
 		},
@@ -463,7 +488,7 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		},
 		WorkspaceDir: cfg.WorkspaceDir(),
 		HeartbeatList: func() []tool.HeartbeatTaskInfo {
-			tasks := sched.HeartbeatTaskList()
+			tasks := jobExec.HeartbeatTaskList()
 			out := make([]tool.HeartbeatTaskInfo, len(tasks))
 			for i, t := range tasks {
 				out[i] = tool.HeartbeatTaskInfo{
@@ -483,7 +508,7 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 			return out
 		},
 		HeartbeatTrigger: func(ctx context.Context, name string) error {
-			return sched.TriggerHeartbeatTask(ctx, name)
+			return jobExec.TriggerHeartbeatTask(ctx, name)
 		},
 		JobAdd: func(name, scheduleKind, scheduleValue, agentID, prompt, sessionTarget string, deleteAfterRun *bool, contextMessages string) (tool.JobInfo, error) {
 			sched := agent.JobSchedule{}
@@ -608,7 +633,7 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		router:        router,
 		tools:         toolReg,
 		runner:        runner,
-		scheduler:     sched,
+		workspaces:    workspaces,
 		tasks:         taskRegistry,
 		flows:         flowExecutor,
 		jobStore:      jobStore,
@@ -686,12 +711,12 @@ func (g *Gateway) Start() error {
 		"idle_timeout", g.idleTimeout,
 	)
 
-	// Start scheduler (heartbeat, cron, BOOT.md)
-	if g.scheduler != nil {
-		g.scheduler.Start(g.ctx)
+	// Run BOOT.md if needed (once per day)
+	if g.jobExecutor != nil {
+		go g.jobExecutor.RunBootIfNeeded(g.ctx, g.workspaces)
 	}
 
-	// Start unified job executor
+	// Start unified job executor (handles all scheduling: heartbeat, cron, one-shots)
 	if g.jobExecutor != nil {
 		g.jobExecutor.Start(g.ctx)
 	}
@@ -706,9 +731,6 @@ func (g *Gateway) Start() error {
 	<-g.ctx.Done()
 	if g.jobExecutor != nil {
 		g.jobExecutor.Stop()
-	}
-	if g.scheduler != nil {
-		g.scheduler.Stop()
 	}
 	return g.cleanup()
 }
@@ -1073,7 +1095,7 @@ func (g *Gateway) onIdle() {
 		g.resetIdle()
 		return
 	}
-	if g.scheduler != nil && g.scheduler.HasPending() {
+	if g.jobStore != nil && g.jobStore.Count() > 0 {
 		g.resetIdle()
 		return
 	}
@@ -1124,8 +1146,8 @@ func (g *Gateway) handleAgentRun(c *conn, env Envelope) {
 		return
 	}
 
-	g.agents.SetStatus(a.ID(), agent.StatusRunning)
-	defer g.agents.SetStatus(a.ID(), agent.StatusIdle)
+	// Instance registration happens inside Runner.Run() keyed by session ID.
+	// No singleton status tracking here.
 
 	// Emit function sends stream events to the client
 	emitFn := func(ev agent.StreamEvent) error {
@@ -1138,16 +1160,36 @@ func (g *Gateway) handleAgentRun(c *conn, env Envelope) {
 		return c.send(streamEnv)
 	}
 
-	// Determine workspace roots based on session context
+	// Determine project context from session metadata or client CWD.
+	// Guard: $HOME is never a project root — ~/.eclaire/ is the global config dir.
+	home, _ := os.UserHomeDir()
+	var projectRoot string
 	wsRoots := []string{g.config.GlobalDir()} // ~/.eclaire/ always allowed
 	if req.SessionID != "" {
 		if meta, err := g.sessions.GetMeta(req.SessionID); err == nil && meta.ProjectRoot != "" {
-			wsRoots = append(wsRoots, meta.ProjectRoot)
+			projectRoot = meta.ProjectRoot
 		}
-	} else if req.CWD != "" {
-		// New session from CWD — detect project root
-		if projectRoot := detectProjectRoot(req.CWD); projectRoot != "" {
-			wsRoots = append(wsRoots, projectRoot)
+	}
+	if projectRoot == "" && req.CWD != "" {
+		projectRoot = detectProjectRoot(req.CWD)
+	}
+	// Never treat $HOME as a project root
+	if projectRoot == home {
+		projectRoot = ""
+	}
+	if projectRoot != "" {
+		wsRoots = append(wsRoots, projectRoot)
+	}
+
+	// .eclaire/ path — only set if .eclaire/ actually exists at the project root.
+	// Never set to ~/.eclaire/ (the global config dir).
+	var projectDir string
+	if projectRoot != "" {
+		eclairePath := filepath.Join(projectRoot, ".eclaire")
+		if eclairePath != g.config.GlobalDir() {
+			if info, serr := os.Stat(eclairePath); serr == nil && info.IsDir() {
+				projectDir = eclairePath
+			}
 		}
 	}
 
@@ -1159,6 +1201,8 @@ func (g *Gateway) handleAgentRun(c *conn, env Envelope) {
 		Title:          req.Title,
 		PermissionMode: tool.PermissionWriteOnly,
 		WorkspaceRoots: wsRoots,
+		ProjectRoot:    projectRoot,
+		ProjectDir:     projectDir,
 	}
 
 	// If continuing an existing session, rebuild conversation history from events
@@ -1323,18 +1367,26 @@ func (g *Gateway) handleSessionContinue(c *conn, env Envelope) {
 	events, _ := g.sessions.ReadEvents(req.SessionID)
 	history := persist.RebuildMessages(events)
 
-	g.agents.SetStatus(a.ID(), agent.StatusRunning)
-	defer g.agents.SetStatus(a.ID(), agent.StatusIdle)
+	// Instance registration happens inside Runner.Run() keyed by session ID.
 
 	emitFn := func(ev agent.StreamEvent) error {
 		evData, _ := json.Marshal(ev)
 		return c.send(Envelope{ID: env.ID, Type: TypeStream, Data: evData})
 	}
 
-	// Workspace roots from session context
+	// Project context from session metadata
+	home, _ := os.UserHomeDir()
 	wsRoots := []string{g.config.GlobalDir()}
-	if meta.ProjectRoot != "" {
-		wsRoots = append(wsRoots, meta.ProjectRoot)
+	var projectRoot, projectDir string
+	if meta.ProjectRoot != "" && meta.ProjectRoot != home {
+		projectRoot = meta.ProjectRoot
+		wsRoots = append(wsRoots, projectRoot)
+		eclairePath := filepath.Join(projectRoot, ".eclaire")
+		if eclairePath != g.config.GlobalDir() {
+			if info, serr := os.Stat(eclairePath); serr == nil && info.IsDir() {
+				projectDir = eclairePath
+			}
+		}
 	}
 
 	cfg := agent.RunConfig{
@@ -1345,6 +1397,8 @@ func (g *Gateway) handleSessionContinue(c *conn, env Envelope) {
 		History:        history,
 		PermissionMode: tool.PermissionWriteOnly,
 		WorkspaceRoots: wsRoots,
+		ProjectRoot:    projectRoot,
+		ProjectDir:     projectDir,
 	}
 
 	result, err := g.runner.Run(g.ctx, cfg, emitFn)
@@ -1486,7 +1540,31 @@ func (g *Gateway) handleTaskList(c *conn, env Envelope) {
 }
 
 func (g *Gateway) handleCronList(c *conn, env Envelope) {
-	entries := g.scheduler.Entries()
+	// Legacy cron.list now returns jobs from unified store
+	jobs := g.jobStore.List()
+	type cronEntry struct {
+		ID       string `json:"id"`
+		Schedule string `json:"schedule"`
+		AgentID  string `json:"agent_id"`
+		Prompt   string `json:"prompt"`
+		Enabled  bool   `json:"enabled"`
+	}
+	var entries []cronEntry
+	for _, j := range jobs {
+		if !j.Enabled {
+			continue
+		}
+		schedule := ""
+		switch j.Schedule.Kind {
+		case agent.ScheduleCron:
+			schedule = j.Schedule.Expr
+		case agent.ScheduleEvery:
+			schedule = "every " + j.Schedule.Every
+		case agent.ScheduleAt:
+			schedule = "at " + j.Schedule.At
+		}
+		entries = append(entries, cronEntry{ID: j.ID, Schedule: schedule, AgentID: j.AgentID, Prompt: j.Prompt, Enabled: j.Enabled})
+	}
 	data, _ := json.Marshal(entries)
 	g.respond(c, env, data, nil)
 }
@@ -1498,29 +1576,33 @@ func (g *Gateway) handleCronAdd(c *conn, env Envelope) {
 		return
 	}
 
-	// Use the manage tool's cron file helpers
-	cronPath := g.config.CronPath()
-	entries := tool.ReadCronFilePublic(cronPath)
-
-	found := false
-	for i, e := range entries {
-		if e.ID == req.ID {
-			entries[i] = tool.CronEntry{ID: req.ID, Schedule: req.Schedule, AgentID: req.AgentID, Prompt: req.Prompt, Enabled: true}
-			found = true
-			break
-		}
+	// Create a cron job in the unified store
+	id := "cron-" + req.ID
+	if _, exists := g.jobStore.Get(id); exists {
+		// Update existing
+		g.jobStore.Update(id, func(j *agent.Job) {
+			j.Schedule.Expr = req.Schedule
+			j.AgentID = req.AgentID
+			j.Prompt = req.Prompt
+			j.Enabled = true
+		})
+	} else {
+		g.jobStore.Add(agent.Job{
+			ID:   id,
+			Name: "cron: " + req.ID,
+			Schedule: agent.JobSchedule{
+				Kind: agent.ScheduleCron,
+				Expr: req.Schedule,
+			},
+			AgentID:        req.AgentID,
+			Prompt:         req.Prompt,
+			SessionTarget:  "isolated",
+			Enabled:        true,
+			DeleteAfterRun: false,
+		})
 	}
-	if !found {
-		entries = append(entries, tool.CronEntry{ID: req.ID, Schedule: req.Schedule, AgentID: req.AgentID, Prompt: req.Prompt, Enabled: true})
-	}
 
-	if err := tool.WriteCronFilePublic(cronPath, entries); err != nil {
-		g.respond(c, env, nil, &ErrorPayload{Code: 500, Message: err.Error()})
-		return
-	}
-
-	result := g.reloadFn()
-	data, _ := json.Marshal(result)
+	data, _ := json.Marshal(map[string]int{"jobs": g.jobStore.Count()})
 	g.respond(c, env, data, nil)
 }
 
@@ -1531,23 +1613,18 @@ func (g *Gateway) handleCronRemove(c *conn, env Envelope) {
 		return
 	}
 
-	cronPath := g.config.CronPath()
-	entries := tool.ReadCronFilePublic(cronPath)
-
-	var kept []tool.CronEntry
-	for _, e := range entries {
-		if e.ID != req.ID {
-			kept = append(kept, e)
-		}
+	// Try with "cron-" prefix first, then bare ID
+	id := "cron-" + req.ID
+	if _, exists := g.jobStore.Get(id); !exists {
+		id = req.ID
 	}
-
-	if err := tool.WriteCronFilePublic(cronPath, kept); err != nil {
-		g.respond(c, env, nil, &ErrorPayload{Code: 500, Message: err.Error()})
+	_, err := g.jobStore.Remove(id)
+	if err != nil {
+		g.respond(c, env, nil, &ErrorPayload{Code: 404, Message: err.Error()})
 		return
 	}
 
-	result := g.reloadFn()
-	data, _ := json.Marshal(result)
+	data, _ := json.Marshal(map[string]int{"jobs": g.jobStore.Count()})
 	g.respond(c, env, data, nil)
 }
 

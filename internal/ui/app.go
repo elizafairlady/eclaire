@@ -205,6 +205,9 @@ type App struct {
 	// Reminders store for sidebar display
 	reminders *tool.ReminderStore
 
+	// Client CWD — sent with each agent run for project context
+	cwd string
+
 	// Approval flow
 	approvalCh chan ApprovalResponseMsg
 }
@@ -290,6 +293,13 @@ func NewApp(gw *gateway.Client, s styles.Styles, opts ...AppOptions) *App {
 	// Set initial session IDs from gateway connect response
 	if opt.MainSessionID != "" {
 		app.sessionIDs["orchestrator"] = opt.MainSessionID
+	}
+
+	// Store CWD for agent runs. Prefer project root from connect response.
+	if opt.ProjectRoot != "" {
+		app.cwd = opt.ProjectRoot
+	} else {
+		app.cwd, _ = os.Getwd()
 	}
 
 	return app
@@ -988,6 +998,7 @@ func (m *App) runStream(agentID, prompt string) {
 		AgentID:   agentID,
 		Prompt:    prompt,
 		SessionID: m.sessionIDs[agentID], // empty on first message, populated after
+		CWD:       m.cwd,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

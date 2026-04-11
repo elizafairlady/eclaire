@@ -231,41 +231,35 @@ steps:
 }
 
 // =============================================================================
-// Behavioral test: heartbeat with real HEARTBEAT.md
+// Behavioral test: heartbeat via unified job executor
 // =============================================================================
 
 func TestBehavior_Heartbeat(t *testing.T) {
 	dir := t.TempDir()
 
-	// Set up workspace with HEARTBEAT.md
+	// Set up workspace with structured HEARTBEAT.md
 	wsDir := filepath.Join(dir, "workspace")
 	os.MkdirAll(wsDir, 0o755)
 	os.WriteFile(filepath.Join(wsDir, "HEARTBEAT.md"), []byte(`# Heartbeat Checks
-- Check for overdue reminders
-- Check system health
-- Log daily summary
+
+tasks:
+  - name: reminder-check
+    interval: 30m
+    agent: orchestrator
+    prompt: "Check for overdue reminders and system health"
 `), 0o644)
 
 	model := &testutil.MockModel{
 		Responses: []testutil.MockResponse{
-			// Model calls reminder list
-			{ToolCalls: []testutil.MockToolCall{
-				{Name: "eclaire_reminder", ID: "tc-1", Input: map[string]any{
-					"operation": "list",
-				}},
-			}},
-			// Model responds with summary
 			{Text: "Heartbeat complete. No overdue reminders. System healthy."},
 		},
 	}
 
 	env := testutil.NewTestEnv(dir, model)
 
-	// Register reminder tool
 	reminderStore := tool.NewReminderStore(filepath.Join(dir, "reminders.json"))
 	env.Tools.Register(tool.ReminderTool(reminderStore))
 
-	// Wire workspace loader + context engine
 	agentsDir := filepath.Join(dir, "agents")
 	os.MkdirAll(agentsDir, 0o755)
 	wsLoader := agent.NewWorkspaceLoader(wsDir, agentsDir, "")
@@ -273,31 +267,60 @@ func TestBehavior_Heartbeat(t *testing.T) {
 	env.Runner.Workspaces = wsLoader
 	env.Runner.ContextEngine = agent.NewContextEngine(nil, wsLoader, skillLoader)
 
-	// Create scheduler and run heartbeat
+	// Create job store and executor
+	jobStore, err := agent.NewJobStore(filepath.Join(dir, "jobs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runLog := agent.NewRunLog(filepath.Join(dir, "runs"))
+	notifStore, _ := agent.NewNotificationStore(filepath.Join(dir, "notifications.jsonl"))
 	msgBus := env.Bus
-	sched := agent.NewScheduler(
-		env.Runner, wsLoader, env.Registry, msgBus, env.Logger,
-		"30m", filepath.Join(dir, "cron.yaml"), filepath.Join(dir, "heartbeat"),
-	)
 
-	// Subscribe to heartbeat events
+	jobExec := agent.NewJobExecutor(jobStore, runLog, notifStore, env.Runner, env.Registry, msgBus, env.Logger)
+
+	// Sync heartbeat tasks to jobs
+	if err := jobExec.SyncHeartbeatJobs(wsLoader); err != nil {
+		t.Fatalf("sync heartbeat: %v", err)
+	}
+
+	// Verify job was created
+	jobs := jobStore.List()
+	found := false
+	for _, j := range jobs {
+		if j.ID == "heartbeat-reminder-check" {
+			found = true
+			if j.Schedule.Kind != agent.ScheduleEvery {
+				t.Errorf("expected schedule kind 'every', got %q", j.Schedule.Kind)
+			}
+			if j.Schedule.Every != "30m" {
+				t.Errorf("expected interval '30m', got %q", j.Schedule.Every)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("heartbeat job not created")
+	}
+
+	// Subscribe to heartbeat completed events
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	heartbeatCh := msgBus.Subscribe(ctx, bus.TopicHeartbeatStarted)
+	heartbeatCh := msgBus.Subscribe(ctx, bus.TopicHeartbeatCompleted)
 
-	// Run heartbeat directly (not via scheduler Start which is async)
-	go sched.RunHeartbeatNow(ctx)
+	// Trigger the heartbeat job
+	if err := jobExec.TriggerHeartbeatTask(ctx, "reminder-check"); err != nil {
+		t.Fatalf("trigger heartbeat: %v", err)
+	}
 
-	// Wait for heartbeat started event
+	// Wait for heartbeat completed event
 	select {
 	case ev := <-heartbeatCh:
 		hbEvent, ok := ev.Payload.(bus.HeartbeatEvent)
 		if !ok {
 			t.Fatal("unexpected event type")
 		}
-		if hbEvent.Items != 3 {
-			t.Errorf("heartbeat items = %d, want 3", hbEvent.Items)
+		if hbEvent.Items != 1 {
+			t.Errorf("heartbeat items = %d, want 1", hbEvent.Items)
 		}
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for heartbeat event")

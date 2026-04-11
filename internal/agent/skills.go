@@ -45,10 +45,17 @@ func NewSkillLoader(globalDir, agentsDir, projectDir string) *SkillLoader {
 	}
 }
 
-// Load discovers all skills for the given agent, applying the 3-level
-// hierarchy with deduplication (higher priority wins).
-// If allowlist is non-nil and non-empty, only skills with matching names are returned.
+// Load discovers all skills for the given agent using the loader's static projectDir.
+// For per-connection project dirs, use LoadWithProject instead.
 func (l *SkillLoader) Load(agentID string, allowlist []string) []Skill {
+	return l.LoadWithProject(agentID, allowlist, l.projectDir)
+}
+
+// LoadWithProject discovers all skills for the given agent, applying the 3-level
+// hierarchy with deduplication (higher priority wins).
+// projectDir overrides the static projectDir for layer 3 (project skills).
+// If allowlist is non-nil and non-empty, only skills with matching names are returned.
+func (l *SkillLoader) LoadWithProject(agentID string, allowlist []string, projectDir string) []Skill {
 	skills := make(map[string]Skill)
 
 	// Priority 10: global skills
@@ -67,8 +74,8 @@ func (l *SkillLoader) Load(agentID string, allowlist []string) []Skill {
 	}
 
 	// Priority 30: project skills
-	if l.projectDir != "" {
-		projectSkillsDir := filepath.Join(l.projectDir, "skills")
+	if projectDir != "" {
+		projectSkillsDir := filepath.Join(projectDir, "skills")
 		for _, s := range scanSkillsDir(projectSkillsDir, "project", 30) {
 			if existing, ok := skills[s.Meta.Name]; !ok || s.Priority > existing.Priority {
 				skills[s.Meta.Name] = s

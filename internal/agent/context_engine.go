@@ -82,16 +82,38 @@ func (e *ContextEngine) SetRegistry(r *Registry) {
 	e.registry = r
 }
 
+// AssembleOpts configures context assembly beyond the required parameters.
+type AssembleOpts struct {
+	// ProjectRoot is the client's project directory (e.g. "/home/user/myproject").
+	// Used for instruction file discovery, git context, and CWD display.
+	// If empty, falls back to os.Getwd() (daemon CWD).
+	ProjectRoot string
+
+	// ProjectDir is the .eclaire/ directory path (e.g. "/home/user/myproject/.eclaire").
+	// Used for project-level skill discovery. May be empty if no .eclaire/ exists.
+	ProjectDir string
+}
+
 // Assemble builds the system prompt for an agent run, filtered by mode.
 // Empty mode is treated as PromptModeFull.
 // skillsAllowlist optionally filters skills to only those named (nil = all).
 // features enables opt-in composable sections (instruction files, project context, etc.).
-func (e *ContextEngine) Assemble(agentID string, workspace *Workspace, toolNames []string, contextWindow int64, overrides string, mode PromptMode, skillsAllowlist []string, features []SectionFeature) *ContextPlan {
+// opts may be nil for default behavior.
+func (e *ContextEngine) Assemble(agentID string, workspace *Workspace, toolNames []string, contextWindow int64, overrides string, mode PromptMode, skillsAllowlist []string, features []SectionFeature, opts *AssembleOpts) *ContextPlan {
 	if mode == PromptModeNone {
 		return &ContextPlan{
 			SystemPrompt: "You are Claire, a personal AI assistant operating inside eclaire.",
 			Budget:       TokenBudget{ContextWindow: contextWindow, Available: contextWindow},
 		}
+	}
+
+	// Resolve effective CWD: prefer client's project root, fallback to daemon CWD
+	effectiveCWD := ""
+	if opts != nil && opts.ProjectRoot != "" {
+		effectiveCWD = opts.ProjectRoot
+	}
+	if effectiveCWD == "" {
+		effectiveCWD, _ = os.Getwd()
 	}
 
 	featureSet := make(map[SectionFeature]bool, len(features))
@@ -124,7 +146,7 @@ func (e *ContextEngine) Assemble(agentID string, workspace *Workspace, toolNames
 
 	// [100] Runtime header
 	if sectionIncluded("runtime", mode) {
-		addSection("runtime", 100, buildRuntimeHeader())
+		addSection("runtime", 100, buildRuntimeHeader(effectiveCWD))
 	}
 
 	// [95] SOUL.md
@@ -172,16 +194,14 @@ func (e *ContextEngine) Assemble(agentID string, workspace *Workspace, toolNames
 
 	// [75] Instruction files (opt-in via FeatureInstructionFiles)
 	if featureSet[FeatureInstructionFiles] && sectionIncluded("instruction_files", mode) {
-		cwd, _ := os.Getwd()
-		if files := DiscoverInstructionFiles(cwd); len(files) > 0 {
+		if files := DiscoverInstructionFiles(effectiveCWD); len(files) > 0 {
 			addSection("instruction_files", 75, renderInstructionFiles(files))
 		}
 	}
 
 	// [73] Project context (opt-in via FeatureProjectContext)
 	if featureSet[FeatureProjectContext] && sectionIncluded("project_context", mode) {
-		cwd, _ := os.Getwd()
-		if ctx := buildProjectContext(cwd); ctx != "" {
+		if ctx := buildProjectContext(effectiveCWD); ctx != "" {
 			addSection("project_context", 73, ctx)
 		}
 	}
@@ -193,7 +213,11 @@ func (e *ContextEngine) Assemble(agentID string, workspace *Workspace, toolNames
 
 	// [65] Skills
 	if e.skills != nil && sectionIncluded("skills", mode) {
-		skills := e.skills.Load(agentID, skillsAllowlist)
+		projectDir := ""
+		if opts != nil {
+			projectDir = opts.ProjectDir
+		}
+		skills := e.skills.LoadWithProject(agentID, skillsAllowlist, projectDir)
 		if len(skills) > 0 {
 			addSection("skills", 65, SerializeSkills(skills))
 		}
@@ -654,8 +678,7 @@ func sectionIncluded(name string, mode PromptMode) bool {
 	}
 }
 
-func buildRuntimeHeader() string {
-	cwd, _ := os.Getwd()
+func buildRuntimeHeader(cwd string) string {
 	home, _ := os.UserHomeDir()
 	header := fmt.Sprintf("# Runtime\n- Date: %s\n- OS: %s/%s\n- CWD: %s\n- Home: %s\n- Writes outside home directory will prompt for user approval",
 		time.Now().Format("2006-01-02 15:04 MST"),

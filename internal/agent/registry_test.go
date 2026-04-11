@@ -120,14 +120,36 @@ func TestRegistryAll(t *testing.T) {
 	}
 }
 
-func TestRegistrySetStatus(t *testing.T) {
+func TestRegistryInstanceTracking(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&stubAgent{id: "s1"})
 
-	r.SetStatus("s1", StatusRunning)
+	// Register an instance — agent should show as running
+	r.RegisterInstance("sess-1", "s1", nil)
 	all := r.All()
 	if all[0].Status != StatusRunning {
 		t.Errorf("got status %q, want %q", all[0].Status, StatusRunning)
+	}
+
+	// Register a second parallel instance of the same agent
+	r.RegisterInstance("sess-2", "s1", nil)
+	instances := r.RunningInstances("s1")
+	if len(instances) != 2 {
+		t.Errorf("expected 2 running instances, got %d", len(instances))
+	}
+
+	// Remove one — agent should still be running (other instance exists)
+	r.RemoveInstance("sess-1")
+	all = r.All()
+	if all[0].Status != StatusRunning {
+		t.Errorf("after removing one instance, status should still be running, got %q", all[0].Status)
+	}
+
+	// Remove the second — agent should be idle
+	r.RemoveInstance("sess-2")
+	all = r.All()
+	if all[0].Status != StatusIdle {
+		t.Errorf("after removing all instances, status should be idle, got %q", all[0].Status)
 	}
 }
 
@@ -159,18 +181,22 @@ func TestRegistryUpsertReplace(t *testing.T) {
 	}
 }
 
-func TestRegistryUpsertPreservesStatus(t *testing.T) {
+func TestRegistryUpsertPreservesInstances(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&stubAgent{id: "test"})
-	r.SetStatus("test", StatusRunning)
+	r.RegisterInstance("sess-1", "test", nil)
 
+	// Upsert the definition — running instance should be preserved
 	r.Upsert(&stubAgent{id: "test", name: "Updated"})
 
 	all := r.All()
 	for _, a := range all {
 		if a.ID == "test" && a.Status != StatusRunning {
-			t.Errorf("status = %q, want running (preserved)", a.Status)
+			t.Errorf("status = %q, want running (instance preserved across upsert)", a.Status)
 		}
+	}
+	if r.HasRunning() != true {
+		t.Error("should still have running instances after upsert")
 	}
 }
 

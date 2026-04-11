@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -241,6 +242,12 @@ func (e *JobExecutor) executeAndApply(ctx context.Context, j Job) {
 		}
 	}
 
+	// Determine source tag for notifications and bus events
+	source := "cron"
+	if strings.HasPrefix(j.ID, heartbeatJobPrefix) {
+		source = "heartbeat"
+	}
+
 	// Create notification
 	if e.notifications != nil {
 		sev := SeverityInfo
@@ -253,7 +260,7 @@ func (e *JobExecutor) executeAndApply(ctx context.Context, j Job) {
 		}
 		e.notifications.Add(Notification{
 			Severity: sev,
-			Source:   "cron",
+			Source:   source,
 			Title:    title,
 			Content:  content,
 			AgentID:  j.AgentID,
@@ -261,13 +268,17 @@ func (e *JobExecutor) executeAndApply(ctx context.Context, j Job) {
 		})
 	}
 
-	// Publish bus event
+	// Publish bus events
 	status := "completed"
 	errStr := ""
 	if err != nil {
 		status = "error"
 		errStr = err.Error()
 	}
+
+	// Publish heartbeat-specific events for heartbeat jobs
+	e.publishHeartbeatEvents(j, duration, errStr)
+
 	e.bus.Publish(bus.TopicCronCompleted, bus.CronEvent{
 		EntryID:   j.ID,
 		AgentID:   j.AgentID,
@@ -276,7 +287,7 @@ func (e *JobExecutor) executeAndApply(ctx context.Context, j Job) {
 		Error:     errStr,
 	})
 	e.bus.Publish(bus.TopicBackgroundResult, bus.BackgroundResult{
-		Source:   "cron",
+		Source:   source,
 		TaskName: j.Name,
 		AgentID:  j.AgentID,
 		Status:   status,

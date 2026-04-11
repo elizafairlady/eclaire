@@ -20,8 +20,18 @@ type emitKeyType struct{}
 // sessionKeyType is the context key for the current session ID.
 type sessionKeyType struct{}
 
+// projectContextKeyType is the context key for project context (inherited by sub-agents).
+type projectContextKeyType struct{}
+
+// ProjectContext carries per-connection project context through the context chain.
+type ProjectContext struct {
+	Root string // project directory (for git context, instruction files)
+	Dir  string // .eclaire/ path (for workspace/skills); empty if no .eclaire/
+}
+
 var emitKey = emitKeyType{}
 var sessionKey = sessionKeyType{}
+var projectContextKey = projectContextKeyType{}
 
 // EmitFromContext retrieves the emit function from a context, if present.
 func EmitFromContext(ctx context.Context) (func(StreamEvent) error, bool) {
@@ -35,6 +45,12 @@ func SessionFromContext(ctx context.Context) string {
 	return s
 }
 
+// ProjectFromContext retrieves the project context, if present.
+func ProjectFromContext(ctx context.Context) ProjectContext {
+	pc, _ := ctx.Value(projectContextKey).(ProjectContext)
+	return pc
+}
+
 // ContextWithEmit stores an emit function in the context.
 func ContextWithEmit(ctx context.Context, emit func(StreamEvent) error) context.Context {
 	return context.WithValue(ctx, emitKey, emit)
@@ -43,6 +59,11 @@ func ContextWithEmit(ctx context.Context, emit func(StreamEvent) error) context.
 // ContextWithSession stores the current session ID in the context.
 func ContextWithSession(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, sessionKey, sessionID)
+}
+
+// ContextWithProject stores project context for sub-agent inheritance.
+func ContextWithProject(ctx context.Context, pc ProjectContext) context.Context {
+	return context.WithValue(ctx, projectContextKey, pc)
 }
 
 // StreamEvent is the typed payload for stream envelopes.
@@ -120,6 +141,8 @@ type RunConfig struct {
 	Compaction     CompactionConfig   // zero value = disabled
 	PermissionMode tool.PermissionMode // zero value = PermissionAllow
 	WorkspaceRoots []string           // override workspace root dirs; empty = use runner defaults
+	ProjectRoot    string             // client's project root dir (for git context, instruction files)
+	ProjectDir     string             // client's .eclaire/ dir (for project workspace/skills); empty if no .eclaire/
 }
 
 // CompactionConfig controls automatic conversation compaction.
@@ -166,12 +189,22 @@ func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) 
 		sessionID = meta.ID
 	}
 
+	// Register this instance in the registry for observability and lifecycle tracking.
+	// Each concurrent run of the same agent type gets its own instance keyed by session ID.
+	if r.Registry != nil {
+		r.Registry.RegisterInstance(sessionID, cfg.AgentID, nil)
+		defer r.Registry.RemoveInstance(sessionID)
+	}
+
 	// Get tools for this agent (no wrappers — runtime handles hooks + permissions directly)
 	agentTools := r.Tools.ForAgent(cfg.AgentID, cfg.Agent.RequiredTools())
 
-	// Store emit and session in context so sub-agent tools can forward events
+	// Store emit, session, and project context so sub-agent tools can inherit them
 	ctx = ContextWithEmit(ctx, emit)
 	ctx = ContextWithSession(ctx, sessionID)
+	if cfg.ProjectRoot != "" || cfg.ProjectDir != "" {
+		ctx = ContextWithProject(ctx, ProjectContext{Root: cfg.ProjectRoot, Dir: cfg.ProjectDir})
+	}
 
 	// Resolve model role
 	role := string(cfg.Agent.Role())
@@ -329,7 +362,7 @@ func (r *Runner) assemblePrompt(cfg RunConfig, agentTools []fantasy.AgentTool, c
 	if ba, ok := cfg.Agent.(interface{ EmbeddedWorkspace() map[string]string }); ok {
 		embedded = ba.EmbeddedWorkspace()
 	}
-	ws, err := r.Workspaces.Load(cfg.AgentID, embedded)
+	ws, err := r.Workspaces.LoadWithProject(cfg.AgentID, embedded, cfg.ProjectDir)
 	if err != nil {
 		r.Logger.Warn("failed to load workspace", "agent", cfg.AgentID, "err", err)
 		if ya, ok := cfg.Agent.(interface{ SystemPrompt() string }); ok {
@@ -361,7 +394,11 @@ func (r *Runner) assemblePrompt(cfg RunConfig, agentTools []fantasy.AgentTool, c
 		}
 	}
 
-	plan := r.ContextEngine.Assemble(cfg.AgentID, ws, toolNames, contextWindow, overrides, cfg.PromptMode, skillsAllowlist, sectionFeatures)
+	var assembleOpts *AssembleOpts
+	if cfg.ProjectRoot != "" || cfg.ProjectDir != "" {
+		assembleOpts = &AssembleOpts{ProjectRoot: cfg.ProjectRoot, ProjectDir: cfg.ProjectDir}
+	}
+	plan := r.ContextEngine.Assemble(cfg.AgentID, ws, toolNames, contextWindow, overrides, cfg.PromptMode, skillsAllowlist, sectionFeatures, assembleOpts)
 	return plan.SystemPrompt
 }
 
@@ -569,14 +606,19 @@ func (r *Runner) RunSubAgent(parentCtx context.Context, agentID, prompt, parentS
 		}
 	}
 
+	// Inherit project context from parent so sub-agents get the right workspace/git context
+	pc := ProjectFromContext(parentCtx)
+
 	// Run the agent with minimal prompt — sub-agents don't need memory/user/daily
 	cfg := RunConfig{
-		AgentID:      agentID,
+		AgentID:        agentID,
 		Agent:          a,
 		Prompt:         prompt,
 		ParentSessID:   parentSessionID,
 		PromptMode:     PromptModeMinimal,
 		PermissionMode: tool.PermissionWriteOnly,
+		ProjectRoot:    pc.Root,
+		ProjectDir:     pc.Dir,
 	}
 
 	result, err := r.Run(parentCtx, cfg, wrappedEmit)

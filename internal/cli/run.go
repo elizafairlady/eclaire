@@ -56,9 +56,11 @@ var runCmd = &cobra.Command{
 		}
 
 		prompt := strings.Join(args, " ")
+		cwd, _ := os.Getwd()
 		req := gateway.AgentRunRequest{
 			AgentID:    agentID,
 			Prompt:     prompt,
+			CWD:        cwd,
 			Title:      runSessionName,
 			Background: runBackground,
 		}

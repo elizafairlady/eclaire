@@ -180,3 +180,96 @@ func TestWorkspaceNoDir(t *testing.T) {
 		t.Errorf("should have no files, got %d", len(ws.Files))
 	}
 }
+
+func TestLoadWithProject(t *testing.T) {
+	dir := t.TempDir()
+
+	// Set up global workspace
+	globalWS := filepath.Join(dir, "workspace")
+	os.MkdirAll(globalWS, 0o755)
+	os.WriteFile(filepath.Join(globalWS, "SOUL.md"), []byte("global soul"), 0o644)
+	os.WriteFile(filepath.Join(globalWS, "USER.md"), []byte("global user"), 0o644)
+
+	// Set up project A workspace
+	projectA := filepath.Join(dir, "projectA", ".eclaire")
+	os.MkdirAll(filepath.Join(projectA, "workspace"), 0o755)
+	os.WriteFile(filepath.Join(projectA, "workspace", "SOUL.md"), []byte("project A soul"), 0o644)
+	os.WriteFile(filepath.Join(projectA, "workspace", "TOOLS.md"), []byte("project A tools"), 0o644)
+
+	// Set up project B workspace
+	projectB := filepath.Join(dir, "projectB", ".eclaire")
+	os.MkdirAll(filepath.Join(projectB, "workspace"), 0o755)
+	os.WriteFile(filepath.Join(projectB, "workspace", "SOUL.md"), []byte("project B soul"), 0o644)
+
+	loader := NewWorkspaceLoader(globalWS, filepath.Join(dir, "agents"), "")
+
+	// Load with project A — should override SOUL.md, add TOOLS.md, keep USER.md
+	wsA, err := loader.LoadWithProject("test", nil, projectA)
+	if err != nil {
+		t.Fatalf("LoadWithProject A: %v", err)
+	}
+	if wsA.Get("SOUL.md") != "project A soul" {
+		t.Errorf("project A SOUL.md = %q, want 'project A soul'", wsA.Get("SOUL.md"))
+	}
+	if wsA.Get("USER.md") != "global user" {
+		t.Errorf("USER.md should fall through to global, got %q", wsA.Get("USER.md"))
+	}
+	if wsA.Get("TOOLS.md") != "project A tools" {
+		t.Errorf("TOOLS.md = %q, want 'project A tools'", wsA.Get("TOOLS.md"))
+	}
+
+	// Load with project B — different SOUL.md
+	wsB, err := loader.LoadWithProject("test", nil, projectB)
+	if err != nil {
+		t.Fatalf("LoadWithProject B: %v", err)
+	}
+	if wsB.Get("SOUL.md") != "project B soul" {
+		t.Errorf("project B SOUL.md = %q, want 'project B soul'", wsB.Get("SOUL.md"))
+	}
+	if wsB.Get("TOOLS.md") != "" {
+		t.Errorf("project B should not have TOOLS.md, got %q", wsB.Get("TOOLS.md"))
+	}
+
+	// Load with empty project dir — no project overlay
+	wsNone, err := loader.LoadWithProject("test", nil, "")
+	if err != nil {
+		t.Fatalf("LoadWithProject empty: %v", err)
+	}
+	if wsNone.Get("SOUL.md") != "global soul" {
+		t.Errorf("no project SOUL.md = %q, want 'global soul'", wsNone.Get("SOUL.md"))
+	}
+}
+
+func TestLoadWithProject_AgentOverlay(t *testing.T) {
+	dir := t.TempDir()
+
+	globalWS := filepath.Join(dir, "workspace")
+	os.MkdirAll(globalWS, 0o755)
+	os.WriteFile(filepath.Join(globalWS, "SOUL.md"), []byte("global soul"), 0o644)
+
+	// Project with agent-specific overlay
+	projectDir := filepath.Join(dir, "project", ".eclaire")
+	agentOverlay := filepath.Join(projectDir, "agents", "coding", "workspace")
+	os.MkdirAll(agentOverlay, 0o755)
+	os.WriteFile(filepath.Join(agentOverlay, "SOUL.md"), []byte("coding agent project soul"), 0o644)
+
+	loader := NewWorkspaceLoader(globalWS, filepath.Join(dir, "agents"), "")
+
+	// Load for coding agent — should get project agent overlay (priority 35 > global 10)
+	ws, err := loader.LoadWithProject("coding", nil, projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws.Get("SOUL.md") != "coding agent project soul" {
+		t.Errorf("coding agent SOUL.md = %q, want project agent overlay", ws.Get("SOUL.md"))
+	}
+
+	// Load for a different agent — should get global (no agent overlay in project)
+	ws2, err := loader.LoadWithProject("research", nil, projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws2.Get("SOUL.md") != "global soul" {
+		t.Errorf("research agent SOUL.md = %q, want 'global soul'", ws2.Get("SOUL.md"))
+	}
+}

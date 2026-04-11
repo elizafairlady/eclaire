@@ -7,14 +7,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/elizafairlady/eclaire/internal/agent"
 	"github.com/elizafairlady/eclaire/internal/gateway"
 	"github.com/spf13/cobra"
 )
 
+// cronEntry is a local type for deserializing the gateway's cron.list response.
+// The gateway returns jobs from the unified store in this format.
+type cronEntry struct {
+	ID       string `json:"id"`
+	Schedule string `json:"schedule"`
+	AgentID  string `json:"agent_id"`
+	Prompt   string `json:"prompt"`
+	Enabled  bool   `json:"enabled"`
+}
+
 var cronCmd = &cobra.Command{
 	Use:   "cron",
-	Short: "Manage cron schedule",
+	Short: "Manage scheduled jobs (legacy alias for 'ecl job')",
 }
 
 func init() {
@@ -27,7 +36,7 @@ func init() {
 
 var cronListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List cron entries",
+	Short: "List scheduled jobs",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
@@ -48,23 +57,23 @@ var cronListCmd = &cobra.Command{
 			return err
 		}
 
-		var entries []agent.CronEntry
+		var entries []cronEntry
 		if err := json.Unmarshal(data, &entries); err != nil {
 			return fmt.Errorf("parse: %w", err)
 		}
 
 		if len(entries) == 0 {
-			fmt.Println("No cron entries.")
+			fmt.Println("No scheduled jobs.")
 			return nil
 		}
 
-		fmt.Printf("%-20s %-16s %-8s %-14s %s\n", "ID", "SCHEDULE", "ENABLED", "AGENT", "PROMPT")
+		fmt.Printf("%-20s %-20s %-8s %-14s %s\n", "ID", "SCHEDULE", "ENABLED", "AGENT", "PROMPT")
 		for _, e := range entries {
 			enabled := "yes"
 			if !e.Enabled {
 				enabled = "no"
 			}
-			fmt.Printf("%-20s %-16s %-8s %-14s %s\n", e.ID, e.Schedule, enabled, e.AgentID, e.Prompt)
+			fmt.Printf("%-20s %-20s %-8s %-14s %s\n", e.ID, e.Schedule, enabled, e.AgentID, e.Prompt)
 		}
 		return nil
 	},
@@ -78,7 +87,7 @@ var (
 
 var cronAddCmd = &cobra.Command{
 	Use:   "add <id>",
-	Short: "Add or update a cron entry",
+	Short: "Add or update a cron job",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if cronAddSchedule == "" || cronAddAgent == "" || cronAddPrompt == "" {
@@ -114,14 +123,14 @@ var cronAddCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Cron entry %q added (schedule: %s, agent: %s).\n", args[0], cronAddSchedule, cronAddAgent)
+		fmt.Printf("Cron job %q added (schedule: %s, agent: %s).\n", args[0], cronAddSchedule, cronAddAgent)
 		return nil
 	},
 }
 
 var cronRemoveCmd = &cobra.Command{
 	Use:   "remove <id>",
-	Short: "Remove a cron entry",
+	Short: "Remove a scheduled job",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -144,7 +153,7 @@ var cronRemoveCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Cron entry %q removed.\n", args[0])
+		fmt.Printf("Job %q removed.\n", args[0])
 		return nil
 	},
 }

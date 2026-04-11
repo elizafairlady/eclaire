@@ -69,8 +69,17 @@ func NewWorkspaceLoader(globalDir, agentsDir, projectDir string) *WorkspaceLoade
 // 1. embedded defaults (from built-in agent)
 // 2. global workspace (~/.eclaire/workspace/)
 // 3. agent-specific workspace (~/.eclaire/agents/<id>/workspace/)
-// 4. project workspace overlay (.eclaire/workspace/)
+// 4. project workspace overlay (.eclaire/workspace/) — uses l.projectDir (daemon startup)
+//
+// For per-connection project dirs, use LoadWithProject instead.
 func (l *WorkspaceLoader) Load(agentID string, embedded map[string]string) (*Workspace, error) {
+	return l.LoadWithProject(agentID, embedded, l.projectDir)
+}
+
+// LoadWithProject assembles a workspace using the given projectDir for layer 4.
+// projectDir is the .eclaire/ directory path (e.g. "/home/user/myproject/.eclaire").
+// If empty, layer 4 is skipped (no project workspace overlay).
+func (l *WorkspaceLoader) LoadWithProject(agentID string, embedded map[string]string, projectDir string) (*Workspace, error) {
 	ws := &Workspace{
 		AgentID: agentID,
 		Files:   make(map[string]WorkspaceFile),
@@ -95,12 +104,13 @@ func (l *WorkspaceLoader) Load(agentID string, embedded map[string]string) (*Wor
 	l.loadDir(ws, agentWSDir, "agent", 20)
 
 	// Layer 4: project workspace overlay (priority 30)
-	if l.projectDir != "" {
-		projectWSDir := filepath.Join(l.projectDir, "workspace")
+	// Only loads if .eclaire/ exists at the project root.
+	if projectDir != "" {
+		projectWSDir := filepath.Join(projectDir, "workspace")
 		l.loadDir(ws, projectWSDir, "project", 30)
 
 		// Also check project agent-specific overlay
-		projectAgentWSDir := filepath.Join(l.projectDir, "agents", agentID, "workspace")
+		projectAgentWSDir := filepath.Join(projectDir, "agents", agentID, "workspace")
 		l.loadDir(ws, projectAgentWSDir, "project", 35)
 	}
 

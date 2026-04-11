@@ -105,7 +105,7 @@ func runSystemPrompt(cmd *cobra.Command, args []string) error {
 	if sf, ok := target.(agent.SectionFeatured); ok {
 		sectionFeatures = sf.SectionFeatures()
 	}
-	plan := engine.Assemble(spAgent, ws, target.RequiredTools(), 128000, "", mode, skillsAllowlist, sectionFeatures)
+	plan := engine.Assemble(spAgent, ws, target.RequiredTools(), 128000, "", mode, skillsAllowlist, sectionFeatures, nil)
 
 	// Print prompt to stdout
 	fmt.Println(plan.SystemPrompt)
