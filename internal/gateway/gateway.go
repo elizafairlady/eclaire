@@ -318,6 +318,7 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	})
 
 	jobExec := agent.NewJobExecutor(jobStore, runLog, notifStore, runner, registry, msgBus, logger)
+	jobExec.SetMainSession(mainSessionID, sysEvents)
 
 	// Wire reminder firing into job executor's tick loop
 	jobExec.SetReminders(&reminderAdapter{store: reminderStore})

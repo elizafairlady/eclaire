@@ -63,11 +63,17 @@ func TestLaunchesToOrchestratorChat(t *testing.T) {
 	if len(app.tabs) != 1 {
 		t.Fatalf("got %d tabs, want 1", len(app.tabs))
 	}
+	if app.tabs[0].ID != "main" {
+		t.Errorf("first tab ID = %q, want main", app.tabs[0].ID)
+	}
 	if app.tabs[0].AgentID != "orchestrator" {
 		t.Errorf("first tab agent = %q, want orchestrator", app.tabs[0].AgentID)
 	}
+	if app.tabs[0].Label != "Claire" {
+		t.Errorf("first tab label = %q, want Claire", app.tabs[0].Label)
+	}
 	if app.tabs[0].Closable {
-		t.Error("orchestrator tab should not be closable")
+		t.Error("main tab should not be closable")
 	}
 	if app.focus != focusEditor {
 		t.Error("should start with editor focused")
@@ -116,15 +122,15 @@ func TestActiveAgentID(t *testing.T) {
 func TestHandleStreamEvent(t *testing.T) {
 	s := styles.Default()
 	app := NewApp(nil, s)
-	app.busy["orchestrator"] = true
+	app.busy["main"] = true
 
-	app.handleStreamEvent(agent.StreamEvent{Type: agent.EventTextDelta, Delta: "hello"})
-	if app.streaming["orchestrator"] != "hello" {
-		t.Errorf("streaming = %q", app.streaming["orchestrator"])
+	app.handleStreamEvent("main", agent.StreamEvent{Type: agent.EventTextDelta, Delta: "hello"})
+	if app.streaming["main"] != "hello" {
+		t.Errorf("streaming = %q", app.streaming["main"])
 	}
 
-	app.handleStreamEvent(agent.StreamEvent{Type: agent.EventToolCall, ToolName: "shell", ToolCallID: "tc1", Input: `{"command":"ls"}`})
-	cl := app.chatList("orchestrator")
+	app.handleStreamEvent("main", agent.StreamEvent{Type: agent.EventToolCall, ToolName: "shell", ToolCallID: "tc1", Input: `{"command":"ls"}`})
+	cl := app.chatList("main")
 	item, ok := cl.GetTool("tc1")
 	if !ok {
 		t.Fatal("tool call should be in chatList")
@@ -137,15 +143,15 @@ func TestHandleStreamEvent(t *testing.T) {
 func TestSlashClear(t *testing.T) {
 	s := styles.Default()
 	app := NewApp(nil, s)
-	app.chatMsgs["orchestrator"] = []chatEntry{{kind: "user", content: "test"}}
-	app.streaming["orchestrator"] = "partial"
+	app.chatMsgs["main"] = []chatEntry{{kind: "user", content: "test"}}
+	app.streaming["main"] = "partial"
 
 	app.handleSlashCommand("/clear")
 
-	if len(app.chatMsgs["orchestrator"]) != 0 {
+	if len(app.chatMsgs["main"]) != 0 {
 		t.Error("should be cleared")
 	}
-	if _, ok := app.streaming["orchestrator"]; ok {
+	if _, ok := app.streaming["main"]; ok {
 		t.Error("streaming should be cleared")
 	}
 }
@@ -155,7 +161,7 @@ func TestNestedStreamEvents(t *testing.T) {
 	app := NewApp(nil, s)
 
 	// Sub-agent started
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type:    agent.EventSubAgentStarted,
 		AgentID: "coding",
 		TaskID:  "task_coding_1",
@@ -173,7 +179,7 @@ func TestNestedStreamEvents(t *testing.T) {
 		t.Errorf("task status = %q, want running", task.status)
 	}
 
-	cl := app.chatList("orchestrator")
+	cl := app.chatList("main")
 	agentItem, ok := cl.GetAgent("task_coding_1")
 	if !ok {
 		t.Fatal("agent tool should be in chatList")
@@ -183,7 +189,7 @@ func TestNestedStreamEvents(t *testing.T) {
 	}
 
 	// Sub-agent tool call
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type:       agent.EventSubAgentToolCall,
 		ToolName:   "shell",
 		ToolCallID: "tc_nested_1",
@@ -199,7 +205,7 @@ func TestNestedStreamEvents(t *testing.T) {
 	}
 
 	// Sub-agent tool result
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type:       agent.EventSubAgentToolResult,
 		ToolName:   "shell",
 		ToolCallID: "tc_nested_1",
@@ -212,7 +218,7 @@ func TestNestedStreamEvents(t *testing.T) {
 	}
 
 	// Sub-agent completed
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type:    agent.EventSubAgentCompleted,
 		AgentID: "coding",
 		TaskID:  "task_coding_1",
@@ -258,10 +264,10 @@ func TestActiveTasksTracking(t *testing.T) {
 	app := NewApp(nil, s)
 
 	// Start two tasks
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type: agent.EventSubAgentStarted, AgentID: "coding", TaskID: "t1",
 	})
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type: agent.EventSubAgentStarted, AgentID: "research", TaskID: "t2",
 	})
 
@@ -270,7 +276,7 @@ func TestActiveTasksTracking(t *testing.T) {
 	}
 
 	// Complete one
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type: agent.EventSubAgentCompleted, AgentID: "coding", TaskID: "t1",
 	})
 
@@ -340,7 +346,7 @@ func TestTokenTracking(t *testing.T) {
 		t.Error("tokens should start at 0")
 	}
 
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type:  agent.EventStepFinish,
 		Usage: &agent.UsageInfo{InputTokens: 1500, OutputTokens: 300},
 	})
@@ -353,7 +359,7 @@ func TestTokenTracking(t *testing.T) {
 	}
 
 	// Second step accumulates
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type:  agent.EventStepFinish,
 		Usage: &agent.UsageInfo{InputTokens: 2000, OutputTokens: 500},
 	})
@@ -371,7 +377,7 @@ func TestTokenTrackingNilUsage(t *testing.T) {
 	app := NewApp(nil, s)
 
 	// StepFinish with nil usage should not panic
-	app.handleStreamEvent(agent.StreamEvent{Type: agent.EventStepFinish})
+	app.handleStreamEvent("main", agent.StreamEvent{Type: agent.EventStepFinish})
 
 	if app.tokensIn != 0 {
 		t.Errorf("tokensIn = %d, want 0", app.tokensIn)
@@ -432,7 +438,7 @@ func TestBriefingInjection(t *testing.T) {
 	// Init should inject the briefing
 	app.injectBriefing()
 
-	msgs := app.chatMsgs["orchestrator"]
+	msgs := app.chatMsgs["main"]
 	if len(msgs) != 1 {
 		t.Fatalf("got %d msgs, want 1", len(msgs))
 	}
@@ -450,7 +456,7 @@ func TestBriefingInjectionNoBriefing(t *testing.T) {
 
 	app.injectBriefing()
 
-	msgs := app.chatMsgs["orchestrator"]
+	msgs := app.chatMsgs["main"]
 	if len(msgs) != 0 {
 		t.Errorf("should not inject when no briefing file exists, got %d msgs", len(msgs))
 	}
@@ -462,7 +468,7 @@ func TestBriefingInjectionNoDir(t *testing.T) {
 
 	app.injectBriefing() // should not panic
 
-	msgs := app.chatMsgs["orchestrator"]
+	msgs := app.chatMsgs["main"]
 	if len(msgs) != 0 {
 		t.Errorf("should not inject when no dir set, got %d msgs", len(msgs))
 	}
@@ -473,7 +479,7 @@ func TestTodoParsedFromToolCall(t *testing.T) {
 	app := NewApp(nil, s)
 
 	// Simulate a todos tool call event with Input
-	app.handleStreamEvent(agent.StreamEvent{
+	app.handleStreamEvent("main", agent.StreamEvent{
 		Type:     agent.EventToolCall,
 		ToolName: "todos",
 		Input:    `{"todos":[{"content":"Write code","status":"in_progress","active_form":"Writing code"},{"content":"Test","status":"pending","active_form":"Testing"}]}`,
@@ -496,7 +502,7 @@ func TestTodoSlashCommand(t *testing.T) {
 
 	// No todos
 	app.handleSlashCommand("/todos")
-	rendered := app.chatList("orchestrator").Render("")
+	rendered := app.chatList("main").Render("")
 	if !strings.Contains(rendered, "No todos") {
 		t.Error("should say no todos when empty")
 	}
@@ -509,7 +515,7 @@ func TestTodoSlashCommand(t *testing.T) {
 	}
 
 	app.handleSlashCommand("/todos")
-	rendered = app.chatList("orchestrator").Render("")
+	rendered = app.chatList("main").Render("")
 	if !strings.Contains(rendered, "✓") {
 		t.Error("should show check for completed")
 	}
@@ -551,7 +557,7 @@ func TestActivityFeedFromToolCalls(t *testing.T) {
 	}
 
 	// Tool call adds activity
-	app.handleStreamEvent(agent.StreamEvent{Type: agent.EventToolCall, ToolName: "shell"})
+	app.handleStreamEvent("main", agent.StreamEvent{Type: agent.EventToolCall, ToolName: "shell"})
 	if len(app.activity) != 1 {
 		t.Fatalf("activity = %d, want 1", len(app.activity))
 	}
@@ -563,7 +569,7 @@ func TestActivityFeedFromToolCalls(t *testing.T) {
 	}
 
 	// Tool result adds activity
-	app.handleStreamEvent(agent.StreamEvent{Type: agent.EventToolResult, ToolName: "shell", Output: "ok"})
+	app.handleStreamEvent("main", agent.StreamEvent{Type: agent.EventToolResult, ToolName: "shell", Output: "ok"})
 	if len(app.activity) != 2 {
 		t.Fatalf("activity = %d, want 2", len(app.activity))
 	}
@@ -572,7 +578,7 @@ func TestActivityFeedFromToolCalls(t *testing.T) {
 	}
 
 	// Sub-agent events
-	app.handleStreamEvent(agent.StreamEvent{Type: agent.EventSubAgentStarted, AgentID: "coding", TaskID: "t1"})
+	app.handleStreamEvent("main", agent.StreamEvent{Type: agent.EventSubAgentStarted, AgentID: "coding", TaskID: "t1"})
 	if len(app.activity) != 3 {
 		t.Fatalf("activity = %d, want 3", len(app.activity))
 	}
@@ -603,22 +609,37 @@ func TestSessionIDTracking(t *testing.T) {
 	s := styles.Default()
 	app := NewApp(nil, s)
 
-	// Initially no session IDs
-	if app.sessionIDs["orchestrator"] != "" {
+	// Initially no session ID on main tab
+	if app.tabs[0].SessionID != "" {
 		t.Error("should start with no session ID")
 	}
 
-	// Simulate receiving a session ID from response
-	app.sessionIDs["orchestrator"] = "sess-abc123"
-
-	if app.sessionIDs["orchestrator"] != "sess-abc123" {
-		t.Errorf("session ID = %q", app.sessionIDs["orchestrator"])
+	// Set session ID via AppOptions
+	app2 := NewApp(nil, s, AppOptions{MainSessionID: "sess-main"})
+	if app2.tabs[0].SessionID != "sess-main" {
+		t.Errorf("main session ID = %q, want sess-main", app2.tabs[0].SessionID)
 	}
 
-	// Different agents have independent sessions
-	app.sessionIDs["coding"] = "sess-def456"
-	if app.sessionIDs["orchestrator"] != "sess-abc123" {
-		t.Error("orchestrator session should be unchanged")
+	// Project session creates second tab with its own session
+	app3 := NewApp(nil, s, AppOptions{
+		MainSessionID:    "sess-main",
+		ProjectSessionID: "sess-proj",
+		ProjectRoot:      "/home/user/myproject",
+	})
+	if len(app3.tabs) != 2 {
+		t.Fatalf("got %d tabs, want 2 (main + project)", len(app3.tabs))
+	}
+	if app3.tabs[0].SessionID != "sess-main" {
+		t.Errorf("main tab session = %q", app3.tabs[0].SessionID)
+	}
+	if app3.tabs[1].SessionID != "sess-proj" {
+		t.Errorf("project tab session = %q", app3.tabs[1].SessionID)
+	}
+	if app3.tabs[1].Label != "myproject" {
+		t.Errorf("project tab label = %q, want myproject", app3.tabs[1].Label)
+	}
+	if !app3.tabs[1].Closable {
+		t.Error("project tab should be closable")
 	}
 }
 
@@ -643,5 +664,138 @@ func TestCloseTab(t *testing.T) {
 	}
 	if app.tabs[0].AgentID != "orchestrator" {
 		t.Error("orchestrator should still be first")
+	}
+}
+
+func TestProjectTabFromOptions(t *testing.T) {
+	s := styles.Default()
+	app := NewApp(nil, s, AppOptions{
+		MainSessionID:    "main-sess",
+		ProjectSessionID: "proj-sess",
+		ProjectRoot:      "/home/user/src/myapp",
+	})
+
+	if len(app.tabs) != 2 {
+		t.Fatalf("got %d tabs, want 2", len(app.tabs))
+	}
+
+	main := app.tabs[0]
+	if main.ID != "main" || main.Label != "Claire" || main.SessionID != "main-sess" {
+		t.Errorf("main tab: ID=%q Label=%q Session=%q", main.ID, main.Label, main.SessionID)
+	}
+
+	proj := app.tabs[1]
+	if proj.ID != "project" {
+		t.Errorf("project tab ID = %q, want project", proj.ID)
+	}
+	if proj.Label != "myapp" {
+		t.Errorf("project tab label = %q, want myapp", proj.Label)
+	}
+	if proj.SessionID != "proj-sess" {
+		t.Errorf("project session = %q", proj.SessionID)
+	}
+	if proj.AgentID != "orchestrator" {
+		t.Errorf("project agent = %q, want orchestrator", proj.AgentID)
+	}
+}
+
+func TestTabIDSeparatesChatState(t *testing.T) {
+	s := styles.Default()
+	app := NewApp(nil, s, AppOptions{
+		MainSessionID:    "main-sess",
+		ProjectSessionID: "proj-sess",
+		ProjectRoot:      "/tmp/proj",
+	})
+
+	// Add messages to main tab
+	app.chatList("main").Add(chat.NewSystemMessage("m1", "main message"))
+	// Add messages to project tab
+	app.chatList("project").Add(chat.NewSystemMessage("p1", "project message"))
+
+	// Chat lists should be independent (different pointers)
+	mainList := app.chatList("main")
+	projList := app.chatList("project")
+	if mainList == projList {
+		t.Error("main and project should have separate chat lists")
+	}
+
+	// Render to verify content is separate
+	mainList.SetSize(80, 40)
+	projList.SetSize(80, 40)
+	mainContent := mainList.Render("")
+	projContent := projList.Render("")
+	if !strings.Contains(mainContent, "main message") {
+		t.Error("main list should contain 'main message'")
+	}
+	if !strings.Contains(projContent, "project message") {
+		t.Error("project list should contain 'project message'")
+	}
+	if strings.Contains(mainContent, "project message") {
+		t.Error("main list should not contain project messages")
+	}
+}
+
+func TestActiveTabID(t *testing.T) {
+	s := styles.Default()
+	app := NewApp(nil, s, AppOptions{
+		MainSessionID:    "m",
+		ProjectSessionID: "p",
+		ProjectRoot:      "/tmp/x",
+	})
+
+	if app.activeTabID() != "main" {
+		t.Errorf("got %q, want main", app.activeTabID())
+	}
+
+	app.activeTab = 1
+	if app.activeTabID() != "project" {
+		t.Errorf("got %q, want project", app.activeTabID())
+	}
+
+	app.openAgentTab("coding")
+	if app.activeTabID() != "coding" {
+		t.Errorf("got %q, want coding", app.activeTabID())
+	}
+}
+
+func TestNotificationDrainMsg(t *testing.T) {
+	s := styles.Default()
+	app := NewApp(nil, s, AppOptions{MainSessionID: "main-sess"})
+
+	// Simulate draining notifications
+	notifs := notificationDrainMsg([]agent.Notification{
+		{ID: "n1", Source: "cron", Title: "Job completed", Content: "All good"},
+		{ID: "n2", Source: "reminder", Title: "Walk dogs"},
+	})
+	app.Update(notifs)
+
+	// Verify notification messages were added to main chat
+	cl := app.chatList("main")
+	cl.SetSize(80, 40)
+	rendered := cl.Render("")
+	if !strings.Contains(rendered, "Job completed") {
+		t.Error("should contain first notification")
+	}
+	if !strings.Contains(rendered, "Walk dogs") {
+		t.Error("should contain second notification")
+	}
+}
+
+func TestMainTabNotClosable(t *testing.T) {
+	s := styles.Default()
+	app := NewApp(nil, s)
+
+	if app.tabs[0].Closable {
+		t.Error("main tab should not be closable")
+	}
+	if app.tabs[0].ID != "main" {
+		t.Errorf("first tab ID = %q, want main", app.tabs[0].ID)
+	}
+
+	// Simulate CloseTab logic from handleKey — main tab should be protected
+	if app.activeTab == 0 && !app.tabs[0].Closable {
+		// This is expected — the close handler checks Closable
+	} else {
+		t.Error("main tab should not be closable via handler")
 	}
 }

@@ -46,6 +46,9 @@ type JobExecutor struct {
 	bus           *bus.Bus
 	logger        *slog.Logger
 
+	mainSessionID string
+	sysEvents     *SystemEventQueue
+
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	lastReapAt time.Time // throttles session reaping to every 5 minutes
@@ -70,6 +73,13 @@ func NewJobExecutor(
 		bus:           msgBus,
 		logger:        logger,
 	}
+}
+
+// SetMainSession configures main session routing for jobs with SessionTarget "main".
+// When set, job results are enqueued as system events to the main session.
+func (e *JobExecutor) SetMainSession(id string, q *SystemEventQueue) {
+	e.mainSessionID = id
+	e.sysEvents = q
 }
 
 // SetReminders wires a ReminderFirer for periodic overdue checking.
@@ -276,6 +286,15 @@ func (e *JobExecutor) executeAndApply(ctx context.Context, j Job) {
 		errStr = err.Error()
 	}
 
+	// Enqueue system event to main session for "main" target jobs
+	if j.SessionTarget == "main" && e.sysEvents != nil && e.mainSessionID != "" {
+		evText := fmt.Sprintf("Job '%s' %s: %s", j.Name, status, truncate(result, 500))
+		if err != nil {
+			evText = fmt.Sprintf("Job '%s' failed: %s", j.Name, err.Error())
+		}
+		e.sysEvents.Enqueue(e.mainSessionID, evText, source, j.ID)
+	}
+
 	// Publish heartbeat-specific events for heartbeat jobs
 	e.publishHeartbeatEvents(j, duration, errStr)
 
@@ -307,14 +326,20 @@ func (e *JobExecutor) executeJob(ctx context.Context, j Job) (string, string, er
 		prompt = j.ContextMessages + "\n\n" + prompt
 	}
 
-	result, err := e.runner.Run(ctx, RunConfig{
+	cfg := RunConfig{
 		AgentID:        j.AgentID,
 		Agent:          a,
 		Prompt:         prompt,
 		PromptMode:     PromptModeMinimal,
 		PermissionMode: tool.PermissionWriteOnly,
-	}, func(ev StreamEvent) error { return nil })
+	}
 
+	// Route to main session when target is "main" and main session is configured
+	if j.SessionTarget == "main" && e.mainSessionID != "" {
+		cfg.SessionID = e.mainSessionID
+	}
+
+	result, err := e.runner.Run(ctx, cfg, func(ev StreamEvent) error { return nil })
 	if err != nil {
 		return "", "", err
 	}

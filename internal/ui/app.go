@@ -68,10 +68,11 @@ func defaultKeyMap() keyMap {
 // --- Tab ---
 
 type Tab struct {
-	ID       string
-	Label    string
-	AgentID  string
-	Closable bool
+	ID        string
+	Label     string
+	AgentID   string
+	SessionID string // explicit session ID for this tab (empty = new session on first message)
+	Closable  bool
 }
 
 // --- Chat entry ---
@@ -127,8 +128,17 @@ const (
 // --- Bubble Tea messages ---
 
 type agentListMsg []agent.Info
-type streamEventMsg agent.StreamEvent
-type streamDoneMsg struct{ AgentID string }
+
+type streamEventMsg struct {
+	tabID string
+	event agent.StreamEvent
+}
+type streamDoneMsg struct{ tabID string }
+type sessionIDMsg struct {
+	tabID     string
+	sessionID string
+}
+type notificationDrainMsg []agent.Notification
 type gatewayEventMsg gateway.Envelope
 type errorMsg struct{ Err error }
 type spinnerTickMsg struct{}
@@ -162,15 +172,14 @@ type App struct {
 	agents   []agent.Info
 	activity []activityEntry // parsed activity feed for sidebar
 
-	// Chat state per agent
+	// Chat state per tab (keyed by Tab.ID)
 	chatLists   map[string]*chat.MessageList
 	chatMsgs    map[string][]chatEntry         // legacy, kept for non-tool messages during transition
 	streaming   map[string]string
 	busy        map[string]bool
-	busyStatus  map[string]string // what the agent is doing right now
+	busyStatus  map[string]string // what the tab's agent is doing right now
 	spinnerIdx  int               // braille spinner frame index
 	activeTasks map[string]*activeTask // taskID -> activeTask
-	sessionIDs  map[string]string      // agentID -> session ID for conversation continuity
 
 	// Streaming channel
 	streamCh chan tea.Msg
@@ -262,37 +271,52 @@ func NewApp(gw *gateway.Client, s styles.Styles, opts ...AppOptions) *App {
 		reminderStore = tool.NewReminderStore(opt.RemindersPath)
 	}
 
-	app := &App{
-		gw:     gw,
-		styles: s,
-		keys:   defaultKeyMap(),
-		help:   help.New(),
-		focus:  focusEditor,
-		tabs: []Tab{{
-			ID:      "orchestrator",
-			Label:   "eclaire",
-			AgentID: "orchestrator",
-		}},
-		chatLists:    make(map[string]*chat.MessageList),
-		chatMsgs:     make(map[string][]chatEntry),
-		streaming:    make(map[string]string),
-		busy:         make(map[string]bool),
-		busyStatus:   make(map[string]string),
-		activeTasks:  make(map[string]*activeTask),
-		sessionIDs:   make(map[string]string),
-		streamCh:     make(chan tea.Msg, 64),
-		textarea:     ta,
-		dialog:       dialog.NewOverlay(),
-		markdown:     newMarkdownRenderer(),
-		followMode:   true,
-		briefingsDir: opt.BriefingsDir,
-		reminders:    reminderStore,
-		approvalCh:   make(chan ApprovalResponseMsg, 4),
+	// Build initial tabs: main session is always tab 0
+	tabs := []Tab{{
+		ID:        "main",
+		Label:     "Claire",
+		AgentID:   "orchestrator",
+		SessionID: opt.MainSessionID,
+	}}
+	// Project session tab when connecting from a project directory
+	if opt.ProjectSessionID != "" {
+		label := opt.ProjectRoot
+		if i := strings.LastIndex(label, "/"); i >= 0 {
+			label = label[i+1:]
+		}
+		if label == "" {
+			label = "project"
+		}
+		tabs = append(tabs, Tab{
+			ID:        "project",
+			Label:     label,
+			AgentID:   "orchestrator",
+			SessionID: opt.ProjectSessionID,
+			Closable:  true,
+		})
 	}
 
-	// Set initial session IDs from gateway connect response
-	if opt.MainSessionID != "" {
-		app.sessionIDs["orchestrator"] = opt.MainSessionID
+	app := &App{
+		gw:          gw,
+		styles:      s,
+		keys:        defaultKeyMap(),
+		help:        help.New(),
+		focus:       focusEditor,
+		tabs:        tabs,
+		chatLists:   make(map[string]*chat.MessageList),
+		chatMsgs:    make(map[string][]chatEntry),
+		streaming:   make(map[string]string),
+		busy:        make(map[string]bool),
+		busyStatus:  make(map[string]string),
+		activeTasks: make(map[string]*activeTask),
+		streamCh:    make(chan tea.Msg, 64),
+		textarea:    ta,
+		dialog:      dialog.NewOverlay(),
+		markdown:    newMarkdownRenderer(),
+		followMode:  true,
+		briefingsDir: opt.BriefingsDir,
+		reminders:   reminderStore,
+		approvalCh:  make(chan ApprovalResponseMsg, 4),
 	}
 
 	// Store CWD for agent runs. Prefer project root from connect response.
@@ -314,6 +338,7 @@ func (m *App) Init() tea.Cmd {
 		m.fetchAgents(),
 		m.listenEvents(),
 		m.listenApprovals(),
+		m.drainNotifications(),
 	)
 }
 
@@ -327,7 +352,7 @@ func (m *App) injectBriefing() {
 	if err != nil || len(data) == 0 {
 		return
 	}
-	m.chatMsgs["orchestrator"] = append(m.chatMsgs["orchestrator"],
+	m.chatMsgs["main"] = append(m.chatMsgs["main"],
 		chatEntry{kind: "system", content: string(data)})
 }
 
@@ -371,12 +396,12 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.agents = []agent.Info(msg)
 
 	case streamEventMsg:
-		cmds = append(cmds, m.handleStreamEvent(agent.StreamEvent(msg)))
+		cmds = append(cmds, m.handleStreamEvent(msg.tabID, msg.event))
 
 	case streamDoneMsg:
-		agentID := msg.AgentID
-		if text, ok := m.streaming[agentID]; ok && text != "" {
-			cl := m.chatList(agentID)
+		tabID := msg.tabID
+		if text, ok := m.streaming[tabID]; ok && text != "" {
+			cl := m.chatList(tabID)
 			cl.Add(chat.NewAssistantMessage(
 				"asst_"+fmt.Sprintf("%d", time.Now().UnixNano()),
 				text,
@@ -384,10 +409,23 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m.markdown.Render(content, width)
 				},
 			))
-			delete(m.streaming, agentID)
+			delete(m.streaming, tabID)
 		}
-		m.busy[agentID] = false
-		delete(m.busyStatus, agentID)
+		m.busy[tabID] = false
+		delete(m.busyStatus, tabID)
+
+	case sessionIDMsg:
+		for i := range m.tabs {
+			if m.tabs[i].ID == msg.tabID {
+				m.tabs[i].SessionID = msg.sessionID
+				break
+			}
+		}
+
+	case notificationDrainMsg:
+		// Store pending notifications for sidebar display.
+		// User navigates to them when ready — never forced.
+		m.pendingNotifs = []agent.Notification(msg)
 
 	case gatewayEventMsg:
 		cmd := m.handleGatewayEvent(gateway.Envelope(msg))
@@ -414,12 +452,12 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.listenApprovals())
 
 	case errorMsg:
-		agentID := m.activeAgentID()
-		cl := m.chatList(agentID)
+		tabID := m.activeTabID()
+		cl := m.chatList(tabID)
 		cl.Add(chat.NewSystemMessage("err_"+fmt.Sprintf("%d", time.Now().UnixNano()), "Error: "+msg.Err.Error()))
 		m.addActivity("✗", msg.Err.Error(), 0)
-		m.busy[agentID] = false
-		delete(m.busyStatus, agentID)
+		m.busy[tabID] = false
+		delete(m.busyStatus, tabID)
 
 	case spinnerTickMsg:
 		m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
@@ -588,24 +626,24 @@ func formatTokenCount(n int64) string {
 }
 
 func (m *App) drawChat(scr uv.Screen, area uv.Rectangle) {
-	agentID := m.tabs[m.activeTab].AgentID
+	tabID := m.activeTabID()
 	chatWidth := area.Dx()
 	chatHeight := area.Dy()
 
-	cl := m.chatList(agentID)
+	cl := m.chatList(tabID)
 	cl.SetSize(chatWidth, chatHeight)
 
 	// Build streaming text with busy indicator
 	streamText := ""
-	if text, ok := m.streaming[agentID]; ok && text != "" {
+	if text, ok := m.streaming[tabID]; ok && text != "" {
 		streamText = m.styles.AssistantBody.Render(text)
 	}
-	if m.busy[agentID] {
+	if m.busy[tabID] {
 		if streamText != "" {
 			streamText += "\n"
 		}
 		frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
-		status := m.busyStatus[agentID]
+		status := m.busyStatus[tabID]
 		if status == "" {
 			status = "thinking..."
 		}
@@ -637,17 +675,16 @@ func (m *App) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 	maxW := area.Dx() - 2
 
 	// --- SESSION ---
-	agentID := m.activeAgentID()
+	tab := m.tabs[m.activeTab]
 	b.WriteString(m.styles.SectionTitle.Render(" SESSION") + "\n")
-	sessionID := m.sessionIDs[agentID]
-	if sessionID != "" {
-		short := sessionID
+	if tab.SessionID != "" {
+		short := tab.SessionID
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		b.WriteString(fmt.Sprintf(" %s %s\n", m.styles.ToolName.Render(agentID), m.styles.Muted.Render(short)))
+		b.WriteString(fmt.Sprintf(" %s %s\n", m.styles.ToolName.Render(tab.AgentID), m.styles.Muted.Render(short)))
 	} else {
-		b.WriteString(fmt.Sprintf(" %s %s\n", m.styles.ToolName.Render(agentID), m.styles.Muted.Render("new")))
+		b.WriteString(fmt.Sprintf(" %s %s\n", m.styles.ToolName.Render(tab.AgentID), m.styles.Muted.Render("new")))
 	}
 	b.WriteByte('\n')
 
@@ -943,7 +980,7 @@ func (m *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		if halfPage < 1 {
 			halfPage = 1
 		}
-		m.chatList(m.activeAgentID()).ScrollBy(halfPage)
+		m.chatList(m.activeTabID()).ScrollBy(halfPage)
 		return nil, true
 
 	case key.Matches(msg, m.keys.ScrollDown):
@@ -951,19 +988,19 @@ func (m *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		if halfPage < 1 {
 			halfPage = 1
 		}
-		m.chatList(m.activeAgentID()).ScrollBy(-halfPage)
+		m.chatList(m.activeTabID()).ScrollBy(-halfPage)
 		return nil, true
 
 	case key.Matches(msg, m.keys.ScrollTop):
-		m.chatList(m.activeAgentID()).ScrollToTop()
+		m.chatList(m.activeTabID()).ScrollToTop()
 		return nil, true
 
 	case key.Matches(msg, m.keys.ScrollEnd):
-		m.chatList(m.activeAgentID()).ScrollToBottom()
+		m.chatList(m.activeTabID()).ScrollToBottom()
 		return nil, true
 
 	case key.Matches(msg, m.keys.ExpandAll):
-		m.chatList(m.activeAgentID()).ToggleExpandAll()
+		m.chatList(m.activeTabID()).ToggleExpandAll()
 		return nil, true
 	}
 
@@ -983,21 +1020,22 @@ func (m *App) sendMessage() tea.Cmd {
 		return m.handleSlashCommand(text)
 	}
 
-	agentID := m.tabs[m.activeTab].AgentID
-	cl := m.chatList(agentID)
+	tab := m.tabs[m.activeTab]
+	tabID := tab.ID
+	cl := m.chatList(tabID)
 	cl.Add(chat.NewUserMessage("user_"+fmt.Sprintf("%d", time.Now().UnixNano()), text))
-	m.busy[agentID] = true
-	m.busyStatus[agentID] = "thinking..."
+	m.busy[tabID] = true
+	m.busyStatus[tabID] = "thinking..."
 
-	go m.runStream(agentID, text)
+	go m.runStream(tabID, tab, text)
 	return tea.Batch(m.waitForStream(), spinnerTick())
 }
 
-func (m *App) runStream(agentID, prompt string) {
+func (m *App) runStream(tabID string, tab Tab, prompt string) {
 	req := gateway.AgentRunRequest{
-		AgentID:   agentID,
+		AgentID:   tab.AgentID,
 		Prompt:    prompt,
-		SessionID: m.sessionIDs[agentID], // empty on first message, populated after
+		SessionID: tab.SessionID,
 		CWD:       m.cwd,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1006,7 +1044,7 @@ func (m *App) runStream(agentID, prompt string) {
 	ch, err := m.gw.Stream(ctx, gateway.MethodAgentRun, req)
 	if err != nil {
 		m.streamCh <- errorMsg{Err: err}
-		m.streamCh <- streamDoneMsg{AgentID: agentID}
+		m.streamCh <- streamDoneMsg{tabID: tabID}
 		return
 	}
 
@@ -1015,7 +1053,7 @@ func (m *App) runStream(agentID, prompt string) {
 		case gateway.TypeStream:
 			var ev agent.StreamEvent
 			if json.Unmarshal(env.Data, &ev) == nil {
-				m.streamCh <- streamEventMsg(ev)
+				m.streamCh <- streamEventMsg{tabID: tabID, event: ev}
 			}
 		case gateway.TypeResponse:
 			// Capture session ID from final response for conversation continuity
@@ -1024,31 +1062,27 @@ func (m *App) runStream(agentID, prompt string) {
 					SessionID string `json:"session_id"`
 				}
 				if json.Unmarshal(env.Data, &resp) == nil && resp.SessionID != "" {
-					m.sessionIDs[agentID] = resp.SessionID
+					m.streamCh <- sessionIDMsg{tabID: tabID, sessionID: resp.SessionID}
 				}
 			}
 		}
 	}
-	m.streamCh <- streamDoneMsg{AgentID: agentID}
+	m.streamCh <- streamDoneMsg{tabID: tabID}
 }
 
-func (m *App) handleStreamEvent(ev agent.StreamEvent) tea.Cmd {
-	agentID := m.activeAgentID()
-	if ev.AgentID != "" && !ev.Nested && !isSubAgentEvent(ev.Type) {
-		agentID = ev.AgentID
-	}
-	cl := m.chatList(agentID)
+func (m *App) handleStreamEvent(tabID string, ev agent.StreamEvent) tea.Cmd {
+	cl := m.chatList(tabID)
 
 	switch ev.Type {
 	case agent.EventTextDelta:
-		m.streaming[agentID] += ev.Delta
-		m.busyStatus[agentID] = "responding..."
+		m.streaming[tabID] += ev.Delta
+		m.busyStatus[tabID] = "responding..."
 
 	case agent.EventToolCall:
 		item := chat.NewToolItem(ev.ToolCallID, ev.ToolName, ev.Input)
 		cl.AddTool(ev.ToolCallID, item)
 		m.addActivity("→", ev.ToolName, 0)
-		m.busyStatus[agentID] = "running " + ev.ToolName + "..."
+		m.busyStatus[tabID] = "running " + ev.ToolName + "..."
 
 		// Capture todo updates
 		if ev.ToolName == "todos" && ev.Input != "" {
@@ -1065,7 +1099,7 @@ func (m *App) handleStreamEvent(ev agent.StreamEvent) tea.Cmd {
 		isError := strings.HasPrefix(output, "Error:")
 		cl.SetToolResult(ev.ToolCallID, output, isError)
 		m.addActivity("✓", ev.ToolName, 0)
-		m.busyStatus[agentID] = "thinking..."
+		m.busyStatus[tabID] = "thinking..."
 
 	case agent.EventStepFinish:
 		if ev.Usage != nil {
@@ -1078,8 +1112,8 @@ func (m *App) handleStreamEvent(ev agent.StreamEvent) tea.Cmd {
 
 	case agent.EventError:
 		cl.Add(chat.NewSystemMessage("err_"+ev.AgentID, "Error: "+ev.Error))
-		m.busy[agentID] = false
-		delete(m.busyStatus, agentID)
+		m.busy[tabID] = false
+		delete(m.busyStatus, tabID)
 
 	// Sub-agent lifecycle
 	case agent.EventSubAgentStarted:
@@ -1127,6 +1161,13 @@ func (m *App) waitForStream() tea.Cmd {
 	return func() tea.Msg { return <-m.streamCh }
 }
 
+func (m *App) activeTabID() string {
+	if m.activeTab < len(m.tabs) {
+		return m.tabs[m.activeTab].ID
+	}
+	return "main"
+}
+
 func (m *App) activeAgentID() string {
 	if m.activeTab < len(m.tabs) {
 		return m.tabs[m.activeTab].AgentID
@@ -1157,40 +1198,40 @@ func ParseSlashCommand(text string) (cmd string, args []string) {
 
 func (m *App) handleSlashCommand(text string) tea.Cmd {
 	cmd, args := ParseSlashCommand(text)
-	agentID := m.activeAgentID()
+	tabID := m.activeTabID()
 
 	switch cmd {
 	case "/clear":
-		m.chatList(agentID).Clear()
-		m.chatMsgs[agentID] = nil
-		delete(m.streaming, agentID)
+		m.chatList(tabID).Clear()
+		m.chatMsgs[tabID] = nil
+		delete(m.streaming, tabID)
 	case "/status":
-		return m.showStatusInline(agentID)
+		return m.showStatusInline(tabID)
 	case "/agents":
-		return m.showAgentsInline(agentID)
+		return m.showAgentsInline(tabID)
 	case "/open":
 		if len(args) > 0 {
 			return m.openAgentTab(args[0])
 		}
-		m.addSystemMsg(agentID, "Usage: /open <agent-id>")
+		m.addSystemMsg(tabID, "Usage: /open <agent-id>")
 	case "/tools":
-		return m.fetchToolsIntoChat(agentID)
+		return m.fetchToolsIntoChat(tabID)
 	case "/scope":
 		if len(args) > 0 {
 			m.scope = args[0]
-			m.addSystemMsg(agentID, fmt.Sprintf("Scope set to: %s", m.scope))
+			m.addSystemMsg(tabID, fmt.Sprintf("Scope set to: %s", m.scope))
 		} else if m.scope != "" {
-			m.addSystemMsg(agentID, fmt.Sprintf("Current scope: %s (use /scope <name> to change, /scope off to clear)", m.scope))
+			m.addSystemMsg(tabID, fmt.Sprintf("Current scope: %s (use /scope <name> to change, /scope off to clear)", m.scope))
 		} else {
-			m.addSystemMsg(agentID, "No scope set. Use /scope work, /scope personal, or /scope <name>")
+			m.addSystemMsg(tabID, "No scope set. Use /scope work, /scope personal, or /scope <name>")
 		}
 		if len(args) > 0 && args[0] == "off" {
 			m.scope = ""
-			m.addSystemMsg(agentID, "Scope cleared.")
+			m.addSystemMsg(tabID, "Scope cleared.")
 		}
 	case "/todos":
 		if len(m.sessionTodos) == 0 {
-			m.addSystemMsg(agentID, "No todos in this session.")
+			m.addSystemMsg(tabID, "No todos in this session.")
 		} else {
 			var sb strings.Builder
 			sb.WriteString("Session Todos:\n")
@@ -1215,12 +1256,12 @@ func (m *App) handleSlashCommand(text string) tea.Cmd {
 				}
 			}
 			sb.WriteString(fmt.Sprintf("\n%d/%d completed", completed, len(m.sessionTodos)))
-			m.addSystemMsg(agentID, sb.String())
+			m.addSystemMsg(tabID, sb.String())
 		}
 	case "/model":
-		m.addSystemMsg(agentID, "Current agent: "+agentID)
+		m.addSystemMsg(tabID, "Current agent: "+m.activeAgentID())
 	default:
-		m.addSystemMsg(agentID, "Commands: /clear /status /agents /open <agent> /tools /scope <name> /todos /model")
+		m.addSystemMsg(tabID, "Commands: /clear /status /agents /open <agent> /tools /scope <name> /todos /model")
 	}
 	return nil
 }
@@ -1247,11 +1288,11 @@ func (m *App) addActivity(icon, text string, depth int) {
 	}
 }
 
-func (m *App) addSystemMsg(agentID, text string) {
-	m.chatList(agentID).Add(chat.NewSystemMessage("sys_"+fmt.Sprintf("%d", time.Now().UnixNano()), text))
+func (m *App) addSystemMsg(tabID, text string) {
+	m.chatList(tabID).Add(chat.NewSystemMessage("sys_"+fmt.Sprintf("%d", time.Now().UnixNano()), text))
 }
 
-func (m *App) showStatusInline(agentID string) tea.Cmd {
+func (m *App) showStatusInline(tabID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1275,13 +1316,13 @@ func (m *App) showStatusInline(agentID string) tea.Cmd {
 			}
 			sb.WriteString(fmt.Sprintf("  %s %-14s %-8s %s%s\n", icon, a.ID, a.Role, string(a.Status), bi))
 		}
-		m.chatMsgs[agentID] = append(m.chatMsgs[agentID],
+		m.chatMsgs[tabID] = append(m.chatMsgs[tabID],
 			chatEntry{kind: "system", content: sb.String()})
 		return nil
 	}
 }
 
-func (m *App) showAgentsInline(agentID string) tea.Cmd {
+func (m *App) showAgentsInline(tabID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1298,13 +1339,13 @@ func (m *App) showAgentsInline(agentID string) tea.Cmd {
 			sb.WriteString(fmt.Sprintf("  %-14s %s\n", a.ID, a.Description))
 		}
 		sb.WriteString("\nUse /open <agent-id> to open a direct chat tab.")
-		m.chatMsgs[agentID] = append(m.chatMsgs[agentID],
+		m.chatMsgs[tabID] = append(m.chatMsgs[tabID],
 			chatEntry{kind: "system", content: sb.String()})
 		return nil
 	}
 }
 
-func (m *App) fetchToolsIntoChat(agentID string) tea.Cmd {
+func (m *App) fetchToolsIntoChat(tabID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1325,7 +1366,7 @@ func (m *App) fetchToolsIntoChat(agentID string) tea.Cmd {
 			}
 			sb.WriteString(fmt.Sprintf("  %-15s %-8s %s\n", t.Name, t.Category, tier))
 		}
-		m.chatMsgs[agentID] = append(m.chatMsgs[agentID],
+		m.chatMsgs[tabID] = append(m.chatMsgs[tabID],
 			chatEntry{kind: "system", content: sb.String()})
 		return nil
 	}
@@ -1334,8 +1375,9 @@ func (m *App) fetchToolsIntoChat(agentID string) tea.Cmd {
 // --- Tab management ---
 
 func (m *App) openAgentTab(agentID string) tea.Cmd {
+	// Check for existing tab with this ID (agent tabs use agentID as tab ID)
 	for i, tab := range m.tabs {
-		if tab.AgentID == agentID {
+		if tab.ID == agentID {
 			m.activeTab = i
 			return nil
 		}
@@ -1344,7 +1386,7 @@ func (m *App) openAgentTab(agentID string) tea.Cmd {
 		ID:       agentID,
 		Label:    agentID,
 		AgentID:  agentID,
-		Closable: agentID != "orchestrator",
+		Closable: true,
 	})
 	m.activeTab = len(m.tabs) - 1
 	return nil
@@ -1363,6 +1405,27 @@ func (m *App) fetchAgents() tea.Cmd {
 		var agents []agent.Info
 		json.Unmarshal(data, &agents)
 		return agentListMsg(agents)
+	}
+}
+
+func (m *App) drainNotifications() tea.Cmd {
+	if m.gw == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// List pending (unread) notifications — don't drain, because approval
+		// notifications must stay available until the user actually responds.
+		data, err := m.gw.Call(ctx, gateway.MethodNotificationList, nil)
+		if err != nil {
+			return nil
+		}
+		var notifs []agent.Notification
+		if json.Unmarshal(data, &notifs) != nil || len(notifs) == 0 {
+			return nil
+		}
+		return notificationDrainMsg(notifs)
 	}
 }
 

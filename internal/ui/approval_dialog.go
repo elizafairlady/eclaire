@@ -1,11 +1,15 @@
 package ui
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/elizafairlady/eclaire/internal/agent"
+	"github.com/elizafairlady/eclaire/internal/gateway"
 	"github.com/elizafairlady/eclaire/internal/ui/dialog"
 	"github.com/elizafairlady/eclaire/internal/ui/styles"
 )

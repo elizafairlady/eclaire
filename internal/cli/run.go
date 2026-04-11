@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/elizafairlady/eclaire/internal/agent"
 	"github.com/elizafairlady/eclaire/internal/gateway"
@@ -57,12 +58,27 @@ var runCmd = &cobra.Command{
 
 		prompt := strings.Join(args, " ")
 		cwd, _ := os.Getwd()
+
+		// Connect to get session context (main session, project session)
+		connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
+		connectResp, _ := client.ConnectWithCWD(connectCtx, cwd)
+		connectCancel()
+
 		req := gateway.AgentRunRequest{
 			AgentID:    agentID,
 			Prompt:     prompt,
 			CWD:        cwd,
 			Title:      runSessionName,
 			Background: runBackground,
+		}
+
+		// Route to appropriate session when using default orchestrator
+		if runAgent == "" && connectResp != nil {
+			if connectResp.ProjectSessionID != "" {
+				req.SessionID = connectResp.ProjectSessionID
+			} else {
+				req.SessionID = connectResp.MainSessionID
+			}
 		}
 
 		if runBackground {

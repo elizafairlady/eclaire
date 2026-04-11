@@ -296,3 +296,109 @@ func TestJobExecutor_BusEvents(t *testing.T) {
 		t.Fatal("timed out waiting for completed event")
 	}
 }
+
+func TestJobExecutor_SessionTargetMain(t *testing.T) {
+	store, _, _, exec, _ := newJobExecTestEnv(t)
+
+	// Wire up main session routing
+	sysEvents := agent.NewSystemEventQueue()
+	exec.SetMainSession("main-session-id", sysEvents)
+
+	past := time.Now().Add(-time.Minute)
+	store.Add(agent.Job{
+		ID:             "main-target",
+		Name:           "main-test",
+		AgentID:        "orchestrator",
+		Prompt:         "run in main",
+		SessionTarget:  "main",
+		DeleteAfterRun: true,
+		Schedule:       agent.JobSchedule{Kind: agent.ScheduleAt, At: "1m"},
+	})
+	store.Update("main-target", func(j *agent.Job) {
+		j.State.NextRunAt = &past
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	exec.Start(ctx)
+	defer exec.Stop()
+
+	// Wait for job execution
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for job execution")
+		default:
+		}
+		events := sysEvents.Peek("main-session-id")
+		if len(events) > 0 {
+			found := false
+			for _, ev := range events {
+				if ev.Source == "cron" {
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// System event should have been enqueued to main session
+	events := sysEvents.Peek("main-session-id")
+	if len(events) == 0 {
+		t.Fatal("expected system event enqueued to main session")
+	}
+}
+
+func TestJobExecutor_SessionTargetIsolatedNoSysEvent(t *testing.T) {
+	store, _, _, exec, _ := newJobExecTestEnv(t)
+
+	sysEvents := agent.NewSystemEventQueue()
+	exec.SetMainSession("main-session-id", sysEvents)
+
+	past := time.Now().Add(-time.Minute)
+	store.Add(agent.Job{
+		ID:             "isolated-target",
+		Name:           "isolated-test",
+		AgentID:        "orchestrator",
+		Prompt:         "run isolated",
+		SessionTarget:  "isolated",
+		DeleteAfterRun: true,
+		Schedule:       agent.JobSchedule{Kind: agent.ScheduleAt, At: "1m"},
+	})
+	store.Update("isolated-target", func(j *agent.Job) {
+		j.State.NextRunAt = &past
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	exec.Start(ctx)
+	defer exec.Stop()
+
+	// Wait for job execution (check it was deleted = executed)
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for job execution")
+		default:
+		}
+		if _, ok := store.Get("isolated-target"); !ok {
+			break // deleted after run = executed
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Isolated target should NOT directly enqueue system events via JobExecutor
+	// (the bus subscriber in gateway handles that separately)
+	events := sysEvents.Peek("main-session-id")
+	if len(events) != 0 {
+		t.Errorf("expected no system events from isolated job, got %d", len(events))
+	}
+}
