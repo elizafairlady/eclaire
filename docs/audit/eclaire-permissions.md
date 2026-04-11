@@ -22,33 +22,31 @@ Audited: 2026-04-09
 ### Bus Topics
 - `TopicApprovalRequest` and `TopicApprovalResult` defined
 
-## What's Broken
+## What Works (updated 2026-04-10)
 
-### Permission Mode Hardcoded to Allow
+### Permission Mode is PermissionWriteOnly
 
-The default `PermissionMode` is `PermissionAllow` which auto-allows everything. There is no configuration option to change this. The Gateway doesn't set it. The TUI doesn't set it. The CLI doesn't set it.
+`PermissionWriteOnly` is the default for ALL runs — gateway.go sets it at lines 1145 and 1331 for both `handleAgentRun` and `handleSessionContinue`. Also set in scheduler.go (lines 240, 541) and jobexec.go (line 304). ReadOnly and Modify tools auto-allowed; Dangerous tools prompt.
 
-**Result**: The entire permission system — PermissionChecker, ApprovalGate, approval_dialog — is never triggered. The user has never seen an approval prompt.
+**Result**: The permission system IS triggered. ApprovalGate blocks on dangerous tool calls. Gateway broadcasts approval requests as `TypeEvent` with `event_type: "approval_request"`. TUI has approval dialog wired. CLI detects TTY and prompts inline or falls back to `ecl notifications <id> yes/no`.
 
-### Missing Pieces
+### Still Missing
 
-1. **No config option for permission mode** — Should be in config.yaml, defaulting to a mode that actually prompts
+1. **No config option for permission mode** — Hardcoded to PermissionWriteOnly, not configurable in config.yaml
 2. **No command-pattern matching** — Currently keyed by `agentID:toolName`, not glob patterns against command strings
 3. **No "allow once" vs "allow for session" distinction** — The approved map is just a boolean
 4. **No "deny" storage** — Can approve but not persistently deny
-5. **Background work policy missing** — Cron jobs should not wait for interactive approval (OpenClaw's hard rule). Must use pre-approved patterns or fail.
-6. **Workspace boundaries not enforced** — `CheckWorkspaceBoundary()` exists but agents are never constrained because mode is always Allow
-7. **`extendRoots()` never called** — Boundary extension on approval never happens because approval never happens
+5. **SessionMeta.ApprovalPatterns** — Field exists but PermissionChecker doesn't read/write it
+6. **Background work pre-approval** — Background jobs use PermissionWriteOnly and block on dangerous tools, but no pre-approval configurable per job
+7. **Approval dialog untested on real TTY**
 
 ## What Needs to Happen
 
-1. Change default PermissionMode to something that prompts (e.g., WorkspaceWrite)
-2. Add config.yaml option for permission_mode
-3. Wire ApprovalGate into the Runner's permission check path
-4. Store approval patterns in SessionMeta.ApprovalPatterns
-5. Implement command-pattern matching (not just tool names)
-6. Add background work policy (pre-approved patterns for cron/heartbeat jobs)
-7. Exercise the approval dialog on a real TTY
+1. Add config.yaml option for permission_mode
+2. Implement command-pattern matching (not just tool names)
+3. Wire SessionMeta.ApprovalPatterns into PermissionChecker
+4. Add background work pre-approval per job or per agent
+5. Exercise the approval dialog on a real TTY
 
 ## Reference
 

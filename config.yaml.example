@@ -1,0 +1,47 @@
+# eclaire configuration
+# Copy to ~/.eclaire/config.yaml and adjust.
+
+gateway:
+  idle_timeout: "10m"        # daemon shuts down after this long with no clients
+  log_level: info            # debug, info, warn, error
+  heartbeat_interval: "30m"  # how often heartbeat tasks run
+  daily_reset_hour: 6        # hour (local time) when BOOT.md runs
+
+# LLM providers. At least one required.
+providers:
+  ollama:
+    type: ollama
+    base_url: "http://localhost:11434"
+  openrouter:
+    type: openrouter
+    api_key: $OPENROUTER_API_KEY   # env var expansion, must use $VAR (not ${VAR})
+
+# Model routing by agent role. Each role falls through the list by priority.
+routing:
+  simple:
+    - provider: ollama
+      model: "qwen3.5:latest"
+  complex:
+    - provider: openrouter
+      model: "anthropic/claude-sonnet-4"
+      priority: 1
+    - provider: ollama
+      model: "gemma4:31b"
+      priority: 2
+  orchestrator:
+    - provider: ollama
+      model: "gemma4:31b"
+
+# Tool trust tier overrides. Tiers: 0=ReadOnly, 1=Modify, 2=Dangerous
+# tools:
+#   overrides:
+#     - agent_id: coding
+#       tool: shell
+#       tier: 1          # make shell Modify instead of Dangerous for coding agent
+
+# Hooks run shell commands on tool lifecycle events.
+# hooks:
+#   - event: PreToolUse    # PreToolUse, PostToolUse, PostToolUseFailure
+#     matcher: "shell"     # glob pattern matching tool name
+#     command: "echo tool about to run"
+#     timeout: "5s"

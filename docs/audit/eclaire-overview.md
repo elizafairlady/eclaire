@@ -1,12 +1,12 @@
 # eclaire Codebase Overview
 
-Audited: 2026-04-09
+Audited: 2026-04-09, updated 2026-04-10
 
 ## Stats
 
-- **LOC**: ~27,100
-- **Go files**: 138 (74 source + 64 test)
-- **Tests**: 379
+- **LOC**: ~34,300
+- **Go files**: 161 (103 source + 58 test)
+- **Tests**: 497
 - **Packages**: 12 internal packages + cmd/ecl
 - **Binary**: `ecl`
 
@@ -15,11 +15,12 @@ Audited: 2026-04-09
 ```
 cmd/ecl/              Entry point (8 lines — calls cli.Execute())
 internal/
-  agent/              25 files, ~4,500 LOC
+  agent/              30+ files, ~6,000+ LOC
                       Agent interface, registry, runner, runtime, context engine,
                       workspace loader, scheduler, job store, job executor,
                       approval gate, task registry, flow executor, coordinator,
-                      skills, compaction, loop detection, notifications, run logs
+                      skills, compaction, loop detection, notifications, run logs,
+                      dreaming, memory flush, system events queue, session reaper
   bus/                2 files, ~160 LOC
                       In-memory typed pub/sub, topic constants
   channel/            1 file, ~154 LOC
@@ -39,7 +40,7 @@ internal/
   testutil/           3 files, ~50 LOC
                       MockModel, MockRouter, TestEnv
   tool/               30 files, ~2,500 LOC
-                      22+ tools, registry, permissions, approval wrapper
+                      26 tools, registry, permissions, approval wrapper
   ui/                 20 files, ~1,500+ LOC
                       Bubble Tea v2 + Ultraviolet Draw, approval dialog,
                       chat rendering, markdown, scrollback
@@ -50,41 +51,46 @@ internal/
 ```
 Gateway.Start()
   ├── AgentRegistry (5 built-in + disk-loaded)          ← WORKS
-  ├── ToolRegistry (30 tools, permission checking)       ← WORKS
+  ├── ToolRegistry (26 tools, permission checking)       ← WORKS
   ├── SessionStore (per-session JSONL)                   ← WORKS
+  │   └── GetOrCreateMain("orchestrator")                ← WORKS (created on startup)
   ├── MessageBus (~15 topics)                            ← WORKS
   ├── ProviderRouter (ollama/openrouter)                 ← WORKS
   ├── Runner
   │   ├── ConversationRuntime (agentic loop)             ← WORKS
   │   ├── HookRunner (if configured)                     ← WORKS
-  │   └── PermissionChecker                              ← EXISTS but mode=Allow (never prompts)
-  ├── WorkspaceLoader (layers 1-3, NOT layer 4)          ← PARTIAL (no project layer)
+  │   ├── PermissionChecker (PermissionWriteOnly)        ← WORKS (prompts on Dangerous tools)
+  │   ├── SystemEventQueue                               ← WORKS (drains into prompt)
+  │   └── MemoryFlush (before compaction)                ← WORKS
+  ├── WorkspaceLoader (layers 1-3 + layer 4 from daemon CWD) ← PARTIAL (not per-connection)
   ├── ContextEngine (priority sections, git, skills)     ← WORKS
-  ├── Scheduler (LEGACY)
-  │   ├── Heartbeat loop (30min ticks)                   ← WORKS
-  │   └── Cron loop (1min ticks, 5-field only)           ← WORKS
-  ├── JobStore (persistent JSON)                         ← EXISTS, wired
-  ├── JobExecutor (timer loop, at/every/cron)            ← EXISTS, wired, COMPETING with Scheduler
-  ├── NotificationStore (JSONL persistence)              ← EXISTS but NOT subscribed to bus
-  ├── ApprovalGate (bus-based blocking)                  ← EXISTS but NEVER triggered
-  └── RunLog (per-job JSONL)                             ← EXISTS, used by JobExecutor only
+  ├── Scheduler (LEGACY — should be removed)
+  │   ├── Heartbeat loop (30min ticks)                   ← WORKS but COMPETING
+  │   └── Cron loop (1min ticks, 5-field only)           ← WORKS but COMPETING
+  ├── JobStore (persistent JSON, at/every/cron)          ← WORKS
+  ├── JobExecutor (timer loop, at/every/cron)            ← WORKS, COMPETING with Scheduler
+  ├── NotificationStore (JSONL persistence)              ← WORKS, subscribed to bus
+  ├── ApprovalGate (bus-based blocking)                  ← WORKS, wired end-to-end
+  ├── RunLog (per-job JSONL)                             ← WORKS
+  ├── DreamingService (3-phase memory consolidation)     ← WORKS (via JobStore)
+  └── SessionReaper (stale session cleanup)              ← WORKS
 
 TUI ←→ Gateway (Unix socket, NDJSON)
-  TUI does NOT pass CWD to gateway
-  TUI does NOT drain notifications on connect
-  TUI does NOT show main session as permanent tab
-  Approval dialog exists but is NEVER shown (mode=Allow)
+  CLI sends CWD on connect via ConnectWithCWD()          ← WORKS
+  Gateway detects project root (detectProjectRoot)       ← WORKS
+  Approval dialog wired via TypeEvent broadcast          ← WORKS
+  TUI does NOT drain notifications on connect            ← MISSING
+  TUI does NOT show main session as permanent tab        ← MISSING
 ```
 
 ## Dead Code
 
 | Item | Location | Why Dead |
 |------|----------|----------|
-| `HeartbeatTask.Once` | scheduler.go:48 | Defined but never checked in isTaskDue() |
-| `BackgroundResult.OneShot` | topics.go:59 | Defined but never set to true |
-| `builtinAgent.Handle/Stream()` | builtin.go:41-48 | Returns dummy "use Runner" string, never called |
+| `HeartbeatTask.Once` | scheduler.go:49 | Defined but never checked in isTaskDue() |
+| `BackgroundResult.OneShot` | topics.go:60 | Defined but never set to true |
+| `builtinAgent.Handle/Stream()` | builtin.go:41-49 | Returns dummy "use Runner" string, never called |
 | `Coordinator.Spawn/Kill/Delegate` | coordinator.go | Defined but not called by Gateway |
-| Project workspace layer | workspace.go | projectDir is never set |
 
 ## Subsystem Status
 
@@ -93,7 +99,7 @@ TUI ←→ Gateway (Unix socket, NDJSON)
 | Subsystem | Status | Validated? |
 |-----------|--------|------------|
 | Agent execution (streaming, tools, compaction) | Code exists, tests pass with mocks | **NO** — not validated with real LLM by user |
-| 30 tools with hook integration | Code exists, unit tests pass | **NO** — individual tools not validated by user |
+| 26 tools with hook integration | Code exists, unit tests pass | **NO** — individual tools not validated by user |
 | Session JSONL persistence | Code exists, unit tests pass | **NO** �� not validated across restarts by user |
 | Heartbeat scheduling (30min) | Code exists, runs on timer | **NO** — user has not confirmed results arrive |
 | Cron scheduling (5-field, 1min ticks) | Code exists, runs on timer | **NO** — user has not confirmed results arrive |
@@ -104,10 +110,12 @@ TUI ←→ Gateway (Unix socket, NDJSON)
 | TUI (markdown, tools, scrollback) | Code exists, not tested on real TTY | **NO** |
 | JobExecutor (unified scheduling) | Code exists, competing with Scheduler | **NO** |
 | JobStore (persistent jobs) | Code exists, unit tests pass | **NO** |
-| NotificationStore | Code exists but never subscribed to bus | **NO** — dead path |
-| ApprovalGate | Code exists but mode always Allow | **NO** — dead path |
-| Permission prompting | Code exists but never triggered | **NO** — dead path |
-| Main session | Concept exists, never created | **NO** — not implemented |
-| Project root detection | Not implemented | **NO** |
-| Project workspace layer | Code exists but projectDir never set | **NO** — dead path |
+| NotificationStore | Code exists, subscribed to bus, CLI works | **NO** — not validated by user |
+| ApprovalGate | Code exists, wired end-to-end, PermissionWriteOnly | **NO** — not validated by user |
+| Permission prompting | Code exists, PermissionWriteOnly default | **NO** — not validated by user |
+| Main session | Created on gateway startup, persists across restarts | **NO** — not validated by user |
+| Project root detection | detectProjectRoot() in gateway, CWD sent on connect | **NO** — not validated by user |
+| Project workspace layer | Loads from daemon CWD only, not per-connection | **NO** — partially working |
+| Memory dreaming (3-phase) | Via JobStore, light/deep/REM schedules | **NO** — not validated by user |
+| System events queue | Drains into prompt, background awareness | **NO** — not validated by user |
 | Coordinator agent management | Code exists but methods never called | **NO** — dead path |

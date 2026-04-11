@@ -1,0 +1,31 @@
+# Example agent definition.
+# Place at ~/.eclaire/agents/<id>/agent.yaml
+# Workspace files go in ~/.eclaire/agents/<id>/workspace/
+
+id: reviewer
+name: Code Reviewer
+description: Reviews code changes for bugs, style, and correctness
+role: complex     # simple, complex, or orchestrator
+model: ""         # leave empty to use routing defaults
+
+# Tools this agent prefers. Not enforced — actual availability
+# depends on the tool registry. Helps the orchestrator decide
+# what this agent is good for.
+tools:
+  - read
+  - view
+  - glob
+  - grep
+  - shell
+  - ls
+
+# Skills this agent can use (by name). Empty = all skills.
+# skills:
+#   - git-review
+#   - lint
+
+# Bindings control when the orchestrator auto-selects this agent.
+# bindings:
+#   - type: project
+#     pattern: "/home/vii/src/*"
+#     priority: 10

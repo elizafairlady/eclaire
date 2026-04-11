@@ -1,6 +1,6 @@
 # eclaire TUI Audit
 
-Audited: 2026-04-09
+Audited: 2026-04-09, updated 2026-04-10
 
 ## What eclaire Implements
 
@@ -76,6 +76,12 @@ AssistantBody style applies padding, then `"\n"` separator breaks it. Should bui
 
 The TUI has only been tested with in-memory screen buffers (`app_test.go`). No verification on actual terminal. Key handling, scrollback, dialog rendering all untested in real environment.
 
+## What Works Now (updated 2026-04-10)
+
+- CWD is sent on connect via `ConnectWithCWD()` (CLI does this before launching TUI)
+- Approval dialog wired to live permission prompts via TypeEvent broadcast
+- Gateway creates project sessions from CWD via `detectProjectRoot()`
+
 ## What Needs to Happen
 
 1. Add `KeyEventHandler` interface to items (return consumed bool)
@@ -84,10 +90,9 @@ The TUI has only been tested with in-memory screen buffers (`app_test.go`). No v
 4. Implement lazy list rendering with item-aware scrolling
 5. Add animation state to tool rendering
 6. Integrate custom markdown styles
-7. Pass CWD to gateway on connect
-8. Drain notifications on connect
-9. Show main session as permanent tab
-10. Wire approval dialog to live permission prompts
+7. Drain notifications on connect
+8. Show main session as permanent tab
+9. Tab model for simultaneous main + project + agent sessions
 
 ## Reference
 

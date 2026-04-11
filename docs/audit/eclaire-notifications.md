@@ -32,27 +32,32 @@ Audited: 2026-04-09
 
 `ecl notifications` command exists in `internal/cli/notification.go`.
 
-## What's Broken
+## What Works (updated 2026-04-10)
 
-### Never Subscribed
+### Bus Subscription Active
 
-`NotificationStore.SubscribeToBus()` is **never called** by the Gateway. The store is created but sits empty. No cron completions, heartbeat results, job executions, or system events ever create notifications.
+`NotificationStore.SubscribeToBus()` IS called in Gateway startup. Job completions from JobExecutor create notifications. Approval requests create notifications with RefID linking to ApprovalGate pending map.
+
+### CLI Integration Active
+
+`ecl notifications` lists pending notifications. `ecl notifications <id> yes/no/always` resolves pending approvals. Mark as read/dismiss works.
+
+## What's Still Missing
 
 ### No TUI Integration
 
-The TUI never calls `Drain()` on connect. There is no notification indicator in the TUI. There is no notification panel. Background work results are invisible to the user.
+The TUI never calls `Drain()` on connect. There is no notification indicator in the TUI. There is no notification panel. Background work results are invisible to TUI users (CLI users can see them).
 
 ### No Channel Delivery
 
-The channel plugin interface exists (`internal/channel/channel.go`) but no channels are implemented. When channels exist (Signal, Telegram, etc.), notifications should push to them too.
+The channel plugin interface exists (`internal/channel/channel.go`) but no channels are implemented.
 
 ## What Needs to Happen
 
-1. Call `NotificationStore.SubscribeToBus(ctx, bus)` in Gateway startup
-2. JobExecutor publishes `BackgroundResult` to bus after every job completion
-3. TUI drains notifications on connect — show count indicator + summary
-4. Add notification panel or inline display in TUI
-5. Eventually: channel delivery for push notifications
+1. TUI drains notifications on connect — show count indicator + summary
+2. Add notification panel or inline display in TUI
+3. Filter by severity, source, time range in CLI
+4. Eventually: channel delivery for push notifications
 
 ## Reference
 

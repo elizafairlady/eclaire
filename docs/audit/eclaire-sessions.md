@@ -21,35 +21,23 @@ Audited: 2026-04-09
 - ProjectRoot (exists but never set)
 - ApprovalPatterns (exists but never used)
 
-## What's Missing
+## What Works (updated 2026-04-10)
 
-### Main Session (Critical)
+### Main Session
 
-**Designed**: One global persistent session. Claire's permanent conversation home. Heartbeats run here. System awareness events accumulate here. Always accessible as a tab in TUI.
+`GetOrCreateMain("orchestrator")` IS called on gateway startup. Main session persists across restarts (loaded from disk). `SystemEventQueue` drains background work awareness into main session prompt. Session lifecycle works: status transitions (active/completed/error), stale session reaping via `reaper.go`.
 
-**Current**: `persist/session.go` has `GetOrCreateMain(agentID)` with `MainSessionID = "main"`. The function exists. But Gateway never calls it on startup. Sessions are created per-run and there is no persistent global session.
+**Still missing**: Main session not shown as permanent TUI tab. Heartbeats don't run in main session. `ecl run` with no project context doesn't connect to main session.
 
-**Impact**:
-- Heartbeats run in ephemeral sessions nobody sees
-- No persistent conversation home for Claire
-- System events have nowhere to accumulate
-- Users can't maintain a long-running relationship with Claire across sessions
+### Project Root Detection
 
-### Project Root Detection (Critical)
+`detectProjectRoot()` in gateway.go walks up from CWD looking for `.eclaire/` or `.git/`. CLI sends CWD on connect via `ConnectWithCWD()`. Gateway creates project sessions via `handleConnect()`.
 
-**Designed**: When TUI connects from a project directory (detected via `.eclaire/`, `.git/`), a project session is created or resumed. Project workspace files layer over global workspace.
-
-**Current**: No project root detection exists anywhere. The TUI does not pass CWD to the gateway on connect. The gateway has no mechanism to detect which project the user is working in.
-
-**Impact**:
-- Project workspace layer (priority 30) never activates
-- Self-modification (eclaire_manage) always writes to `~/.eclaire/`, never to project `.eclaire/`
-- No project-scoped agent configurations
-- No project-scoped conversation isolation
+**Still broken**: Workspace loader's `projectDir` is set once at daemon startup (based on daemon CWD), not updated per-client-connection. A client connecting from a different project directory won't get that project's workspace files. Self-modification still always writes to `~/.eclaire/`.
 
 ### Session Approval Patterns (Not Wired)
 
-`SessionMeta.ApprovalPatterns` field exists (map[string][]string for agentID:toolName → glob patterns). But:
+`SessionMeta.ApprovalPatterns` field exists but:
 - `PermissionChecker` doesn't read from this field
 - No code writes to this field
 - Approval state is purely in-memory and lost on session close

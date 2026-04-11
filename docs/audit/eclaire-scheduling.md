@@ -1,6 +1,6 @@
 # eclaire Scheduling Audit
 
-Audited: 2026-04-09
+Audited: 2026-04-09, updated 2026-04-10
 
 ## Two Competing Systems
 
@@ -63,6 +63,13 @@ eclaire has TWO scheduling systems running in parallel. Both are started by the 
 - Bus publishing
 - Notification creation on completion
 - Run log integration
+
+**What works** (added since initial audit):
+- `eclaire_manage job_add/remove/list/runs/run` — all 5 tool operations exist (25 total manage operations)
+- `ecl job add/remove/list/runs/run` CLI — fully implemented
+- Notification creation on job completion — wired via bus subscription
+- Run logs per-job JSONL — implemented
+- Memory dreaming uses 3 jobs (light/deep/REM phases) via this system
 
 **What's broken**:
 - `Job.ContextMessages` field: designed to embed session history, never set by any tool
