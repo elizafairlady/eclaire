@@ -4,8 +4,8 @@ Audited: 2026-04-09, updated 2026-04-10
 
 ## Stats
 
-- **LOC**: ~34,300
-- **Go files**: 161 (103 source + 58 test)
+- **LOC**: ~34,400
+- **Go files**: 162 (103 source + 59 test)
 - **Tests**: 497
 - **Packages**: 12 internal packages + cmd/ecl
 - **Binary**: `ecl`

@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -134,6 +135,31 @@ func (r *Registry) HasRunning() bool {
 		}
 	}
 	return false
+}
+
+// SerializeAgents formats registered agents as an XML listing for the system prompt.
+// Excludes the calling agent (selfID) from the list.
+func SerializeAgents(agents []Info, selfID string) string {
+	var sb strings.Builder
+	sb.WriteString("<available_agents>\n")
+	sb.WriteString("Use the agent tool to delegate to any of these specialists.\n\n")
+
+	n := 0
+	for _, a := range agents {
+		if a.ID == selfID {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("<agent id=%q name=%q role=%q>\n%s\n</agent>\n",
+			a.ID, a.Name, string(a.Role), a.Description))
+		n++
+	}
+
+	if n == 0 {
+		return ""
+	}
+
+	sb.WriteString("</available_agents>")
+	return sb.String()
 }
 
 // HasBackgroundAgents returns true if any background agents are running.

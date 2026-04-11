@@ -10,7 +10,7 @@ import (
 )
 
 type agentInput struct {
-	Agent  string `json:"agent" jsonschema:"description=The specialist agent to delegate to (e.g. coding, research, sysadmin, config)."`
+	Agent  string `json:"agent" jsonschema:"description=The specialist agent to delegate to. Check available_agents in your context for the full list."`
 	Prompt string `json:"prompt" jsonschema:"description=The task for the sub-agent to perform. Be specific and provide all necessary context."`
 }
 
@@ -19,6 +19,9 @@ type SubAgentDeps struct {
 	// RunSubAgent runs a named agent with emit forwarding.
 	// Returns (content, sessionID, error).
 	RunSubAgent func(parentCtx context.Context, agentID, prompt, parentSessionID string) (string, string, error)
+
+	// ListAgents returns all available agents. Used to build the tool description.
+	ListAgents func() []AgentInfo
 
 	Bus    *bus.Bus
 	Logger *slog.Logger
@@ -33,13 +36,33 @@ type SubAgentDeps struct {
 // - Reply instruction forcing parent to synthesize
 // - Task metadata (agent, status, task label)
 func AgentTool(deps SubAgentDeps) Tool {
-	at := fantasy.NewParallelAgentTool("agent",
-		"Run a specialist agent to perform a task. The agent runs with its own context window and tools. "+
-			"Available agents: coding (programming), research (web research), sysadmin (system tasks), config (eclaire settings). "+
-			"You can run multiple agents in parallel by calling this tool multiple times in one turn.",
+	desc := "Run a specialist agent to perform a task. The agent runs with its own context window and tools. " +
+		"You can run multiple agents in parallel by calling this tool multiple times in one turn."
+	if deps.ListAgents != nil {
+		agents := deps.ListAgents()
+		if len(agents) > 0 {
+			desc += " Available agents: "
+			for i, a := range agents {
+				if i > 0 {
+					desc += ", "
+				}
+				desc += a.ID
+				if a.Description != "" {
+					short := a.Description
+					if len(short) > 60 {
+						short = short[:57] + "..."
+					}
+					desc += " (" + short + ")"
+				}
+			}
+			desc += "."
+		}
+	}
+
+	at := fantasy.NewParallelAgentTool("agent", desc,
 		func(ctx context.Context, input agentInput, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if input.Agent == "" {
-				return fantasy.NewTextErrorResponse("agent is required — specify which specialist to delegate to (coding, research, sysadmin, config)"), nil
+				return fantasy.NewTextErrorResponse("agent is required — check available_agents in your context for the list"), nil
 			}
 			if input.Prompt == "" {
 				return fantasy.NewTextErrorResponse("prompt is required"), nil

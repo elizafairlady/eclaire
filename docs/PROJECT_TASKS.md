@@ -74,12 +74,17 @@ Before building new features, fix what exists but doesn't work.
 - [ ] Migrate heartbeat tasks to Jobs (kind: "every")
 - [ ] Migrate cron entries to Jobs (kind: "cron")
 - [ ] Keep BOOT.md as special startup job
-- [ ] Delete dead code: HeartbeatTask.Once, BackgroundResult.OneShot, builtinAgent.Handle/Stream
-- [ ] Fix context engine section ordering (use sort.Slice, not bubble sort)
-- [ ] Fix context engine minimal mode whitelist (remove inappropriate sections)
-- [ ] Subscribe NotificationStore to bus in Gateway
-- [ ] Fix TUI digit-to-rune bugs (use fmt.Sprintf)
-- [ ] Fix TUI markdown width caching
+- [x] Delete dead code: HeartbeatTask.Once, BackgroundResult.OneShot
+- [x] Fix context engine section ordering (use sort.Slice, not bubble sort)
+- [x] Fix context engine minimal mode whitelist (tightened to 7 sections)
+- [x] Subscribe NotificationStore to bus in Gateway
+- [x] Fix TUI digit-to-rune bugs (use fmt.Sprintf)
+- [x] Fix TUI markdown width caching (round to nearest 10)
+- [x] Fix TUI padding inconsistency (standardized PaddingLeft(2))
+- [x] Gate live LLM tests with `//go:build live` tag (agent tests no longer hang)
+- [x] Dynamic agent discovery (context engine + agent tool description from registry)
+- [x] Approval notifications include available actions
+- [x] Adversary agent role + multi-model orchestration validated end-to-end
 
 ---
 

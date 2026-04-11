@@ -188,6 +188,7 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	workspaces := agent.NewWorkspaceLoader(cfg.WorkspaceDir(), cfg.AgentsDir(), projectDir)
 	skillLoader := agent.NewSkillLoader(cfg.SkillsDir(), cfg.AgentsDir(), projectDir)
 	contextEngine := agent.NewContextEngine(router, workspaces, skillLoader)
+	contextEngine.SetRegistry(registry)
 
 	// Build hook runner from config
 	var hookRunner *hook.Runner
@@ -249,8 +250,22 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	// Register agent tool now that runner exists
 	toolReg.Register(tool.AgentTool(tool.SubAgentDeps{
 		RunSubAgent: runner.RunSubAgent,
-		Bus:         msgBus,
-		Logger:      logger,
+		ListAgents: func() []tool.AgentInfo {
+			infos := registry.All()
+			out := make([]tool.AgentInfo, len(infos))
+			for i, a := range infos {
+				out[i] = tool.AgentInfo{
+					ID:          a.ID,
+					Name:        a.Name,
+					Description: a.Description,
+					Role:        string(a.Role),
+					BuiltIn:     a.BuiltIn,
+				}
+			}
+			return out
+		},
+		Bus:    msgBus,
+		Logger: logger,
 	}))
 	toolReg.Register(tool.TaskStatusTool(sessionStore))
 	toolReg.Register(tool.SessionReadTool(sessionStore))
@@ -1553,10 +1568,11 @@ func (g *Gateway) broadcastApprovalRequests() {
 			g.notifications.Add(agent.Notification{
 				Severity: agent.SeverityError,
 				Source:   "approval",
-				Title:    fmt.Sprintf("Approval needed: %s", req.Description),
-				Content:  fmt.Sprintf("Agent %s wants to %s. Approve via TUI or interactive CLI.", req.AgentID, req.Action),
+				Title:    fmt.Sprintf("Approval needed: Agent %q wants to use tool %q", req.AgentID, req.Action),
+				Content:  fmt.Sprintf("%s\n\nActions: yes (allow once), always (allow for session), no (deny)", req.Description),
 				AgentID:  req.AgentID,
 				RefID:    req.ID,
+				Actions:  agent.ActionsForSource("approval"),
 			})
 		}
 

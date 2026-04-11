@@ -16,6 +16,7 @@ const (
 	RoleComplex      Role = "complex"
 	RoleEmbed        Role = "embed"
 	RoleOrchestrator Role = "orchestrator" // defaults to complex if no explicit route
+	RoleAdversary    Role = "adversary"    // red-team QA, routed to adversarial model
 )
 
 // SectionFeature is an opt-in prompt section that agents can declare.

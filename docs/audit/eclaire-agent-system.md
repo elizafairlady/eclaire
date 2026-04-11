@@ -1,6 +1,6 @@
 # eclaire Agent System Audit
 
-Audited: 2026-04-09
+Audited: 2026-04-09, updated 2026-04-10
 
 ## Agent Interface (`internal/agent/agent.go`)
 
@@ -22,21 +22,26 @@ type Agent interface {
 
 Roles: RoleSimple, RoleComplex, RoleEmbed, RoleOrchestrator
 
-## 5 Built-in Agents (`internal/agent/builtin.go`, `builtin_prompts.go`)
+## 5 Built-in Agents + Disk-Loaded Agents
 
-All have complete SOUL.md, AGENTS.md prompts embedded in Go code (~3,000 lines total).
+Built-in agents have SOUL.md/AGENTS.md prompts embedded in Go code (`builtin.go`, `builtin_prompts.go`). Disk agents loaded from `~/.eclaire/agents/<id>/agent.yaml` + `workspace/*.md`.
 
-| Agent | Role | Tools | Features | Prompt Quality |
-|-------|------|-------|----------|----------------|
-| Orchestrator (Claire) | Orchestrator | 16 | All sections | Excellent — EA personality, delegation rules |
-| Coding | Complex | 10 | InstructionFiles, ProjectContext | Excellent — code-first, verification focus |
-| Research | Complex | 8 | (none extra) | Good — multi-source investigation |
-| Sysadmin | Complex | 8 | (none extra) | Good — safety-first |
-| Config | Simple | 4 | (none extra) | Good — self-modification authority |
+| Agent | Role | Source | Model Route |
+|-------|------|--------|------------|
+| Orchestrator (Claire) | orchestrator | built-in | deepseek/deepseek-v3.2 |
+| Coding | complex | built-in | anthropic/claude-sonnet-4.6 |
+| Research | complex | built-in | (same as coding) |
+| Sysadmin | complex | built-in | (same as coding) |
+| Config | simple | built-in | ollama/gemma4:31b |
+| Adversary | adversary | disk | x-ai/grok-4.20 |
+
+**Dynamic discovery (updated 2026-04-10):** Context engine injects `<available_agents>` XML from registry at priority 89. Agent tool description built dynamically from registry. No hardcoded agent lists — add an agent on disk and it appears everywhere automatically. Validated end-to-end: DeepSeek orchestrator → Claude coding agent → Grok adversarial QA.
 
 **Issue**: `builtinAgent.Handle()` and `Stream()` return dummy "use Runner" strings — dead code. Runner uses different paths via Router/fantasy.
 
 **Issue**: Agent tool lists are suggestions, not enforced. Actual available tools determined by `runner.Tools.ForAgent()`.
+
+**Issue**: `ModelOverride` on yaml agents bypasses routing table — uses model string as role, falls through to `resolveByModel()` instead of checking routing entries for the agent's actual role first.
 
 ## Runner (`internal/agent/runner.go`, ~700 lines)
 

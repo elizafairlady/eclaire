@@ -53,6 +53,8 @@ Claire is the orchestrator. She delegates to specialist agents, each running in 
 
 ## Agents
 
+5 built-in, plus whatever you add on disk.
+
 | Agent | Role | What it does |
 |-------|------|-------------|
 | Claire (orchestrator) | EA | Delegates, manages workflow, runs the show |
@@ -61,7 +63,9 @@ Claire is the orchestrator. She delegates to specialist agents, each running in 
 | sysadmin | Ops | System monitoring, service management, logs |
 | config | Self-modification | Creates new agents, skills, schedules |
 
-Create your own: `ecl agent create myagent` or drop a directory at `~/.eclaire/agents/myagent/` with `agent.yaml` and workspace files.
+Create your own: `ecl agent create myagent` or drop a directory at `~/.eclaire/agents/myagent/` with `agent.yaml` and workspace files. See `examples/agent/` for the format.
+
+Agents are discovered dynamically — add one on disk and it shows up in Claire's context and the delegation tool automatically. Custom roles route through the provider routing table, so you can run different agents on different models (Claude for coding, Grok for adversarial QA, local models for simple tasks).
 
 ## Workspace
 

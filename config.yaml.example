@@ -17,20 +17,24 @@ providers:
     api_key: $OPENROUTER_API_KEY   # env var expansion, must use $VAR (not ${VAR})
 
 # Model routing by agent role. Each role falls through the list by priority.
+# Custom roles (like adversary) are defined here and matched to agent.yaml role fields.
 routing:
   simple:
     - provider: ollama
-      model: "qwen3.5:latest"
+      model: "gemma4:31b"
   complex:
     - provider: openrouter
-      model: "anthropic/claude-sonnet-4"
+      model: "anthropic/claude-sonnet-4.6"
       priority: 1
     - provider: ollama
       model: "gemma4:31b"
       priority: 2
   orchestrator:
-    - provider: ollama
-      model: "gemma4:31b"
+    - provider: openrouter
+      model: "deepseek/deepseek-v3.2"
+  adversary:
+    - provider: openrouter
+      model: "x-ai/grok-4.20"
 
 # Tool trust tier overrides. Tiers: 0=ReadOnly, 1=Modify, 2=Dangerous
 # tools:

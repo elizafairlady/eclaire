@@ -65,6 +65,7 @@ type ContextEngine struct {
 	router     *provider.Router
 	workspaces *WorkspaceLoader
 	skills     *SkillLoader
+	registry   *Registry
 }
 
 // NewContextEngine creates a context engine.
@@ -74,6 +75,11 @@ func NewContextEngine(router *provider.Router, workspaces *WorkspaceLoader, skil
 		workspaces: workspaces,
 		skills:     skills,
 	}
+}
+
+// SetRegistry gives the context engine access to the agent registry for dynamic agent listing.
+func (e *ContextEngine) SetRegistry(r *Registry) {
+	e.registry = r
 }
 
 // Assemble builds the system prompt for an agent run, filtered by mode.
@@ -134,6 +140,14 @@ func (e *ContextEngine) Assemble(agentID string, workspace *Workspace, toolNames
 	// [90] AGENTS.md
 	if sectionIncluded("agents", mode) {
 		addSection("agents", 90, workspace.Get(FileAgents))
+	}
+
+	// [89] Dynamic agent registry — lists all available agents from the registry
+	if e.registry != nil && sectionIncluded("agents", mode) {
+		agents := e.registry.All()
+		if serialized := SerializeAgents(agents, agentID); serialized != "" {
+			addSection("agents_registry", 89, serialized)
+		}
 	}
 
 	// [88] Task guidance (opt-in via FeatureTaskGuidance)

@@ -75,6 +75,18 @@ func runSystemPrompt(cmd *cobra.Command, args []string) error {
 	)
 	engine := agent.NewContextEngine(nil, workspaces, skillLoader)
 
+	// Build registry for dynamic agent listing in prompt
+	reg := agent.NewRegistry()
+	for _, a := range agent.BuiltinAgents() {
+		reg.Register(a)
+	}
+	if diskAgents, err := agent.LoadAgentsDir(cfg.AgentsDir()); err == nil {
+		for _, a := range diskAgents {
+			reg.Register(a)
+		}
+	}
+	engine.SetRegistry(reg)
+
 	// Load workspace
 	ws, err := workspaces.Load(spAgent, embedded)
 	if err != nil {
