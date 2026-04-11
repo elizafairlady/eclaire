@@ -54,7 +54,7 @@ func NewUserMessage(id, content string) *UserMessageItem {
 func (u *UserMessageItem) ID() string              { return u.id }
 func (u *UserMessageItem) Height(width int) int     { return countLines(u.Render(width)) }
 func (u *UserMessageItem) Render(width int) string {
-	return "  \033[1myou\033[0m\n  " + u.content
+	return "\033[1myou\033[0m\n" + u.content
 }
 
 // AssistantMessageItem is the assistant's text response.

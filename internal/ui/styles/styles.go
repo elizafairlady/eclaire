@@ -154,7 +154,7 @@ func Default() Styles {
 			BorderStyle(lipgloss.Border{Left: BorderThick}).
 			BorderLeft(true).
 			BorderForeground(Primary).
-			PaddingLeft(1),
+			PaddingLeft(2),
 		UserLabel: lipgloss.NewStyle().
 			Foreground(Primary).
 			Bold(true),

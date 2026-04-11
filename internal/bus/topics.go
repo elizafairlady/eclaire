@@ -57,7 +57,6 @@ type BackgroundResult struct {
 	Content  string `json:"content"` // the actual result text
 	Error    string `json:"error,omitempty"`
 	RefID    string `json:"ref_id,omitempty"` // source-specific reference (reminder ID, approval ID)
-	OneShot  bool   `json:"one_shot,omitempty"`
 }
 
 // AgentEvent is published for agent lifecycle events.

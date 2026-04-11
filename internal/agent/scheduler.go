@@ -46,7 +46,6 @@ type HeartbeatTask struct {
 	Interval string `json:"interval" yaml:"interval"` // "1m", "5m", "30m", "1h"
 	Agent    string `json:"agent" yaml:"agent"`       // default: "orchestrator"
 	Prompt   string `json:"prompt" yaml:"prompt"`
-	Once     bool   `json:"once,omitempty" yaml:"once,omitempty"` // auto-remove after first run
 }
 
 // HeartbeatTaskState tracks per-task execution state.

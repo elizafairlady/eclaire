@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -60,7 +61,7 @@ func (w *WebSearchToolItem) Render(width int) string {
 		if i >= maxResults {
 			remaining := len(results) - maxResults
 			lines = append(lines, truncHintStyle.Render(
-				"  … ("+strings.Repeat(" ", 0)+string(rune('0'+remaining/10))+string(rune('0'+remaining%10))+" more results)"))
+				"  … ("+fmt.Sprintf("%d", remaining)+" more results)"))
 			break
 		}
 		title := searchTitleStyle.Render(r.title)

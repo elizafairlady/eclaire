@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -338,13 +339,9 @@ func (e *ContextEngine) CompactPrompt(sections []PromptSection, maxTokens int64)
 	// Copy and sort by priority (highest first)
 	sorted := make([]PromptSection, len(sections))
 	copy(sorted, sections)
-	for i := 0; i < len(sorted); i++ {
-		for j := i + 1; j < len(sorted); j++ {
-			if sorted[j].Priority > sorted[i].Priority {
-				sorted[i], sorted[j] = sorted[j], sorted[i]
-			}
-		}
-	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Priority > sorted[j].Priority
+	})
 
 	for _, s := range sorted {
 		if total+s.Tokens <= maxTokens {
@@ -636,8 +633,7 @@ func sectionIncluded(name string, mode PromptMode) bool {
 		return true
 	}
 	switch name {
-	case "runtime", "soul", "agents", "tools", "tools_doc", "skills", "standing_orders",
-		"instruction_files", "project_context", "task_guidance", "action_guidance", "output_style":
+	case "runtime", "soul", "agents", "tools", "tools_doc", "skills", "standing_orders":
 		return true
 	default:
 		return false

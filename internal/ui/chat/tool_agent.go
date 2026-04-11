@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -89,8 +90,8 @@ func (a *AgentToolItem) Render(width int) string {
 	if len(tools) > maxVisibleNestedTools {
 		startIdx = len(tools) - maxVisibleNestedTools
 		b.WriteString("\n" + nestedPrefix + toolParamStyle.Render(
-			strings.Repeat("·", 3)+" ("+strings.Repeat(" ", 0)+
-				string(rune('0'+len(tools)-maxVisibleNestedTools))+
+			strings.Repeat("·", 3)+" ("+
+				fmt.Sprintf("%d", len(tools)-maxVisibleNestedTools)+
 				" earlier tools hidden)"))
 	}
 
