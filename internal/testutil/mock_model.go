@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	"charm.land/fantasy"
 )
@@ -13,6 +14,7 @@ type MockModel struct {
 	Responses []MockResponse
 	callIdx   int
 	Calls     []fantasy.Call
+	mu        sync.Mutex
 }
 
 // MockResponse defines what the model returns for one call.
@@ -30,12 +32,16 @@ type MockToolCall struct {
 }
 
 func (m *MockModel) Generate(_ context.Context, call fantasy.Call) (*fantasy.Response, error) {
+	m.mu.Lock()
 	m.Calls = append(m.Calls, call)
+	m.mu.Unlock()
 	return m.nextResponse(), nil
 }
 
 func (m *MockModel) Stream(_ context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	m.mu.Lock()
 	m.Calls = append(m.Calls, call)
+	m.mu.Unlock()
 	resp := m.nextResponse()
 
 	return func(yield func(fantasy.StreamPart) bool) {
@@ -86,7 +92,18 @@ func (m *MockModel) StreamObject(_ context.Context, _ fantasy.ObjectCall) (fanta
 func (m *MockModel) Provider() string { return "mock" }
 func (m *MockModel) Model() string    { return "mock-model" }
 
+// GetCalls returns a snapshot of all recorded calls (thread-safe).
+func (m *MockModel) GetCalls() []fantasy.Call {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]fantasy.Call, len(m.Calls))
+	copy(cp, m.Calls)
+	return cp
+}
+
 func (m *MockModel) nextResponse() *fantasy.Response {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.callIdx >= len(m.Responses) {
 		return &fantasy.Response{
 			Content:      fantasy.ResponseContent{fantasy.TextContent{Text: "done"}},

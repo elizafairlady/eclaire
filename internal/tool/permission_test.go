@@ -1,10 +1,7 @@
 package tool
 
 import (
-	"context"
 	"testing"
-
-	"charm.land/fantasy"
 )
 
 func TestPermissionCheckerReadOnly(t *testing.T) {
@@ -168,62 +165,6 @@ func TestWorkspaceBoundaryNoPath(t *testing.T) {
 	}
 }
 
-func TestPermissionWrapperDeny(t *testing.T) {
-	r := NewRegistry()
-	r.Register(WriteTool())
-	pc := NewPermissionChecker(r)
-
-	inner := WriteTool()
-	wrapped := WrapPermission(inner, pc, "test", PermissionReadOnly, nil, nil)
-
-	resp, err := wrapped.Run(context.Background(), fantasy.ToolCall{Input: `{"path":"/tmp/test","content":"x"}`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.IsError {
-		t.Error("should be denied in ReadOnly mode")
-	}
-}
-
-func TestPermissionWrapperAllow(t *testing.T) {
-	r := NewRegistry()
-	r.Register(ReadTool())
-	pc := NewPermissionChecker(r)
-
-	inner := ReadTool()
-	wrapped := WrapPermission(inner, pc, "test", PermissionAllow, nil, nil)
-
-	// Just verify it doesn't panic and delegates properly
-	// The actual tool may fail on missing file, but permission should pass
-	resp, _ := wrapped.Run(context.Background(), fantasy.ToolCall{Input: `{"path":"/nonexistent"}`})
-	// ReadOnly tool in Allow mode should not get permission denied
-	if resp.IsError && resp.Content == "Permission denied" {
-		t.Error("should not be permission denied")
-	}
-}
-
-func TestPermissionWrapperNilChecker(t *testing.T) {
-	inner := ReadTool()
-	wrapped := WrapPermission(inner, nil, "test", PermissionAllow, nil, nil)
-	if wrapped != inner {
-		t.Error("nil checker should return inner tool unchanged")
-	}
-}
-
-func TestPermissionWrapperBoundaryDeny(t *testing.T) {
-	r := NewRegistry()
-	r.Register(WriteTool())
-	pc := NewPermissionChecker(r)
-
-	inner := WriteTool()
-	roots := []string{"/home/user/project"}
-	wrapped := WrapPermission(inner, pc, "test", PermissionAllow, roots, nil)
-
-	resp, err := wrapped.Run(context.Background(), fantasy.ToolCall{Input: `{"path":"/etc/malicious","content":"x"}`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.IsError {
-		t.Error("should be denied by workspace boundary")
-	}
-}
+// PermissionWrapper tests removed — PermissionWrapper was dead code (never used in production).
+// Workspace boundary checks are now enforced in ConversationRuntime.executeToolCall().
+// See permission_security_test.go for the active permission path tests.

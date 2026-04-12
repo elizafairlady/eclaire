@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/elizafairlady/eclaire/internal/agent"
+	"github.com/elizafairlady/eclaire/internal/persist"
 	"github.com/elizafairlady/eclaire/internal/tool"
 	"github.com/elizafairlady/eclaire/internal/ui/chat"
 	"github.com/elizafairlady/eclaire/internal/ui/styles"
@@ -37,25 +39,6 @@ func TestParseSlashCommand(t *testing.T) {
 	}
 }
 
-func TestRenderChatEntry(t *testing.T) {
-	s := styles.Default()
-	app := &App{styles: s, markdown: newMarkdownRenderer()}
-
-	entries := []chatEntry{
-		{kind: "user", content: "hello"},
-		{kind: "assistant", content: "hi"},
-		{kind: "tool_call", content: "shell"},
-		{kind: "tool_result", content: "output"},
-		{kind: "system", content: "info"},
-	}
-	for _, e := range entries {
-		got := app.renderChatEntry(e)
-		if got == "" {
-			t.Errorf("renderChatEntry(%+v) returned empty", e)
-		}
-	}
-}
-
 func TestLaunchesToOrchestratorChat(t *testing.T) {
 	s := styles.Default()
 	app := NewApp(nil, s)
@@ -80,26 +63,32 @@ func TestLaunchesToOrchestratorChat(t *testing.T) {
 	}
 }
 
-func TestOpenAgentTab(t *testing.T) {
+func TestOpenSessionTab(t *testing.T) {
 	s := styles.Default()
 	app := NewApp(nil, s)
 
-	app.openAgentTab("coding")
+	sess := persist.SessionMeta{
+		ID:      "sess-abc",
+		AgentID: "orchestrator",
+		Title:   "Test session",
+	}
+	app.openSessionTab(sess)
+
 	if len(app.tabs) != 2 {
 		t.Fatalf("got %d tabs, want 2", len(app.tabs))
 	}
-	if app.tabs[1].AgentID != "coding" {
-		t.Errorf("tab[1].AgentID = %q", app.tabs[1].AgentID)
+	if app.tabs[1].SessionID != "sess-abc" {
+		t.Errorf("tab[1].SessionID = %q", app.tabs[1].SessionID)
 	}
 	if !app.tabs[1].Closable {
-		t.Error("non-orchestrator tabs should be closable")
+		t.Error("session tabs should be closable")
 	}
 	if app.activeTab != 1 {
 		t.Errorf("activeTab = %d, want 1", app.activeTab)
 	}
 
-	// No duplicates
-	app.openAgentTab("coding")
+	// Opening same session again should switch to existing tab, not duplicate
+	app.openSessionTab(sess)
 	if len(app.tabs) != 2 {
 		t.Errorf("duplicate tab, got %d", len(app.tabs))
 	}
@@ -113,9 +102,11 @@ func TestActiveAgentID(t *testing.T) {
 		t.Errorf("got %q, want orchestrator", app.activeAgentID())
 	}
 
-	app.openAgentTab("coding")
-	if app.activeAgentID() != "coding" {
-		t.Errorf("got %q, want coding", app.activeAgentID())
+	// All tabs talk to orchestrator — there's no direct agent tabs
+	sess := persist.SessionMeta{ID: "sess-xyz", AgentID: "orchestrator", Title: "Project work"}
+	app.openSessionTab(sess)
+	if app.activeAgentID() != "orchestrator" {
+		t.Errorf("got %q, want orchestrator", app.activeAgentID())
 	}
 }
 
@@ -143,12 +134,12 @@ func TestHandleStreamEvent(t *testing.T) {
 func TestSlashClear(t *testing.T) {
 	s := styles.Default()
 	app := NewApp(nil, s)
-	app.chatMsgs["main"] = []chatEntry{{kind: "user", content: "test"}}
+	app.chatList("main").Add(chat.NewUserMessage("test-1", "test"))
 	app.streaming["main"] = "partial"
 
 	app.handleSlashCommand("/clear")
 
-	if len(app.chatMsgs["main"]) != 0 {
+	if app.chatList("main").Len() != 0 {
 		t.Error("should be cleared")
 	}
 	if _, ok := app.streaming["main"]; ok {
@@ -226,36 +217,6 @@ func TestNestedStreamEvents(t *testing.T) {
 	})
 	if task.status != "completed" {
 		t.Errorf("task status = %q, want completed", task.status)
-	}
-}
-
-func TestNestedChatEntryRendering(t *testing.T) {
-	s := styles.Default()
-	app := &App{styles: s, markdown: newMarkdownRenderer()}
-
-	// Top-level tool call
-	normal := app.renderChatEntry(chatEntry{kind: "tool_call", content: "shell"})
-	if normal == "" {
-		t.Error("normal render should not be empty")
-	}
-
-	// Nested tool call
-	nested := app.renderChatEntry(chatEntry{
-		kind:    "tool_call",
-		content: "write",
-		agentID: "coding",
-		depth:   1,
-	})
-	if nested == "" {
-		t.Error("nested render should not be empty")
-	}
-	// Nested should contain the agent annotation
-	if !strings.Contains(nested, "coding") {
-		t.Error("nested tool_call should show agent ID")
-	}
-	// Nested should have tree indentation
-	if !strings.Contains(nested, "│") {
-		t.Error("nested tool_call should have tree character")
 	}
 }
 
@@ -438,15 +399,14 @@ func TestBriefingInjection(t *testing.T) {
 	// Init should inject the briefing
 	app.injectBriefing()
 
-	msgs := app.chatMsgs["main"]
-	if len(msgs) != 1 {
-		t.Fatalf("got %d msgs, want 1", len(msgs))
+	cl := app.chatList("main")
+	if cl.Len() != 1 {
+		t.Fatalf("got %d items, want 1", cl.Len())
 	}
-	if msgs[0].kind != "system" {
-		t.Errorf("kind = %q, want system", msgs[0].kind)
-	}
-	if !strings.Contains(msgs[0].content, "Morning Briefing") {
-		t.Errorf("content should have briefing: %s", msgs[0].content)
+	cl.SetSize(80, 40)
+	rendered := cl.Render("")
+	if !strings.Contains(rendered, "Morning Briefing") {
+		t.Errorf("rendered chat should have briefing: %s", rendered)
 	}
 }
 
@@ -456,9 +416,8 @@ func TestBriefingInjectionNoBriefing(t *testing.T) {
 
 	app.injectBriefing()
 
-	msgs := app.chatMsgs["main"]
-	if len(msgs) != 0 {
-		t.Errorf("should not inject when no briefing file exists, got %d msgs", len(msgs))
+	if app.chatList("main").Len() != 0 {
+		t.Errorf("should not inject when no briefing file exists")
 	}
 }
 
@@ -468,9 +427,8 @@ func TestBriefingInjectionNoDir(t *testing.T) {
 
 	app.injectBriefing() // should not panic
 
-	msgs := app.chatMsgs["main"]
-	if len(msgs) != 0 {
-		t.Errorf("should not inject when no dir set, got %d msgs", len(msgs))
+	if app.chatList("main").Len() != 0 {
+		t.Errorf("should not inject when no dir set")
 	}
 }
 
@@ -646,8 +604,8 @@ func TestSessionIDTracking(t *testing.T) {
 func TestCloseTab(t *testing.T) {
 	s := styles.Default()
 	app := NewApp(nil, s)
-	app.openAgentTab("coding")
-	app.openAgentTab("research")
+	app.tabs = append(app.tabs, Tab{ID: "coding", Label: "coding", AgentID: "orchestrator", SessionID: "test-coding-sess", Closable: true}); app.activeTab = len(app.tabs) - 1
+	app.tabs = append(app.tabs, Tab{ID: "research", Label: "research", AgentID: "orchestrator", SessionID: "test-research-sess", Closable: true}); app.activeTab = len(app.tabs) - 1
 
 	if len(app.tabs) != 3 {
 		t.Fatalf("got %d tabs", len(app.tabs))
@@ -752,7 +710,7 @@ func TestActiveTabID(t *testing.T) {
 		t.Errorf("got %q, want project", app.activeTabID())
 	}
 
-	app.openAgentTab("coding")
+	app.tabs = append(app.tabs, Tab{ID: "coding", Label: "coding", AgentID: "orchestrator", SessionID: "test-coding-sess", Closable: true}); app.activeTab = len(app.tabs) - 1
 	if app.activeTabID() != "coding" {
 		t.Errorf("got %q, want coding", app.activeTabID())
 	}
@@ -763,20 +721,20 @@ func TestNotificationDrainMsg(t *testing.T) {
 	app := NewApp(nil, s, AppOptions{MainSessionID: "main-sess"})
 
 	// Simulate draining notifications
-	notifs := notificationDrainMsg([]agent.Notification{
+	notifs := notificationListMsg([]agent.Notification{
 		{ID: "n1", Source: "cron", Title: "Job completed", Content: "All good"},
 		{ID: "n2", Source: "reminder", Title: "Walk dogs"},
 	})
 	app.Update(notifs)
 
-	// Verify notification messages were added to main chat
-	cl := app.chatList("main")
-	cl.SetSize(80, 40)
-	rendered := cl.Render("")
-	if !strings.Contains(rendered, "Job completed") {
+	// Verify notifications are stored for sidebar display (not injected into chat)
+	if len(app.pendingNotifs) != 2 {
+		t.Fatalf("expected 2 pending notifs, got %d", len(app.pendingNotifs))
+	}
+	if app.pendingNotifs[0].Title != "Job completed" {
 		t.Error("should contain first notification")
 	}
-	if !strings.Contains(rendered, "Walk dogs") {
+	if app.pendingNotifs[1].Title != "Walk dogs" {
 		t.Error("should contain second notification")
 	}
 }
@@ -797,5 +755,236 @@ func TestMainTabNotClosable(t *testing.T) {
 		// This is expected — the close handler checks Closable
 	} else {
 		t.Error("main tab should not be closable via handler")
+	}
+}
+
+func TestNotificationFocusKeybind(t *testing.T) {
+	s := styles.Default()
+	app := NewApp(nil, s, AppOptions{MainSessionID: "main-sess"})
+
+	// No notifications — ctrl+j should not change focus
+	if app.openNextNotification() {
+		t.Error("should return false when no notifications")
+	}
+	if app.focus != focusEditor {
+		t.Error("focus should stay on editor")
+	}
+
+	// Add notifications
+	app.pendingNotifs = []agent.Notification{
+		{ID: "n1", Source: "approval", Title: "Shell tool", Actions: []string{"yes", "always", "no"}, Resolved: false},
+		{ID: "n2", Source: "reminder", Title: "Walk dogs", Actions: []string{"complete", "dismiss", "snooze"}, Resolved: false},
+	}
+
+	// ctrl+j should open first unresolved notification
+	if !app.openNextNotification() {
+		t.Fatal("should return true with pending notifications")
+	}
+	if app.focus != focusNotification {
+		t.Error("focus should be notification")
+	}
+	if app.activeNotifID != "n1" {
+		t.Errorf("activeNotifID = %q, want n1", app.activeNotifID)
+	}
+
+	// Cycle to next
+	app.cycleToNextNotification()
+	if app.activeNotifID != "n2" {
+		t.Errorf("after cycle, activeNotifID = %q, want n2", app.activeNotifID)
+	}
+
+	// Cycle wraps around
+	app.cycleToNextNotification()
+	if app.activeNotifID != "n1" {
+		t.Errorf("after wrap, activeNotifID = %q, want n1", app.activeNotifID)
+	}
+
+	// Resolve n1, cycle should skip it
+	app.pendingNotifs[0].Resolved = true
+	app.cycleToNextNotification()
+	if app.activeNotifID != "n2" {
+		t.Errorf("after resolve, activeNotifID = %q, want n2", app.activeNotifID)
+	}
+
+	// Resolve n2 too, cycle should exit notification mode
+	app.pendingNotifs[1].Resolved = true
+	app.cycleToNextNotification()
+	if app.focus != focusEditor {
+		t.Error("should exit notification mode when all resolved")
+	}
+}
+
+func TestNotificationStoreAlwaysSetsActions(t *testing.T) {
+	// NotificationStore.Add() must always populate Actions from source
+	dir := t.TempDir()
+	store, err := agent.NewNotificationStore(dir + "/notifs.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add notification WITHOUT actions — store should fill them in
+	store.Add(agent.Notification{Source: "cron", Title: "Job done"})
+	store.Add(agent.Notification{Source: "approval", Title: "Shell tool"})
+	store.Add(agent.Notification{Source: "system", Title: "Gateway started"})
+	store.Add(agent.Notification{Source: "reminder", Title: "Walk dogs"})
+
+	pending := store.Pending()
+	for _, n := range pending {
+		t.Logf("source=%q actions=%v", n.Source, n.Actions)
+		if len(n.Actions) == 0 {
+			t.Errorf("notification source=%q has no actions after Add()", n.Source)
+		}
+	}
+}
+
+func TestNotificationActionsAfterJSONRoundTrip(t *testing.T) {
+	// Notifications go through NotificationStore.Add() on the gateway,
+	// then serialize to JSON for the TUI. Actions must survive.
+	dir := t.TempDir()
+	store, err := agent.NewNotificationStore(dir + "/notifs.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store.Add(agent.Notification{Source: "approval", Title: "Shell"})
+	store.Add(agent.Notification{Source: "cron", Title: "Job done"})
+
+	// Simulate gateway → JSON → TUI
+	pending := store.Pending()
+	data, _ := json.Marshal(pending)
+	var received []agent.Notification
+	json.Unmarshal(data, &received)
+
+	t.Logf("After JSON round-trip:")
+	for i, n := range received {
+		t.Logf("  n%d: source=%q actions=%v", i, n.Source, n.Actions)
+	}
+
+	for _, n := range received {
+		if len(n.Actions) == 0 {
+			t.Errorf("source=%q has no actions after JSON round-trip", n.Source)
+		}
+	}
+}
+
+func TestNotificationActionsLoadFromDisk(t *testing.T) {
+	// Notifications persisted WITHOUT actions (pre-fix) must get actions on load
+	dir := t.TempDir()
+	path := dir + "/notifs.jsonl"
+
+	// Write a notification without actions (simulates old data)
+	os.WriteFile(path, []byte(`{"id":"old1","source":"approval","title":"Old approval"}
+{"id":"old2","source":"cron","title":"Old cron job"}
+`), 0o644)
+
+	store, err := agent.NewNotificationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pending := store.Pending()
+	for _, n := range pending {
+		t.Logf("Loaded from disk: id=%q source=%q actions=%v", n.ID, n.Source, n.Actions)
+		if len(n.Actions) == 0 {
+			t.Errorf("notification id=%q source=%q loaded from disk has no actions", n.ID, n.Source)
+		}
+	}
+}
+
+func TestNotificationDismissFirstThenOpenSecond(t *testing.T) {
+	s := styles.Default()
+	app := NewApp(nil, s, AppOptions{MainSessionID: "main-sess"})
+
+	// Two notifications with actions
+	app.pendingNotifs = []agent.Notification{
+		{ID: "n1", Source: "approval", Title: "Shell: echo hello",
+			Content: "Agent wants shell", Actions: []string{"yes", "always", "no"}},
+		{ID: "n2", Source: "reminder", Title: "Walk dogs",
+			Content: "Overdue reminder", Actions: []string{"complete", "dismiss", "snooze"}},
+	}
+
+	// Open first notification
+	if !app.openNextNotification() {
+		t.Fatal("should open first notification")
+	}
+	t.Logf("After open: focus=%d activeIdx=%d activeID=%q cursor=%d",
+		app.focus, app.activeNotifIdx, app.activeNotifID, app.notifActionCursor)
+	t.Logf("n1 actions: %v", app.pendingNotifs[0].Actions)
+	t.Logf("n2 actions: %v", app.pendingNotifs[1].Actions)
+
+	// Render to see what user sees
+	prompt1 := app.renderNotificationPrompt()
+	t.Logf("First notification prompt:\n%s", prompt1)
+
+	if !strings.Contains(prompt1, "yes") {
+		t.Error("first notification should show 'yes' action")
+	}
+
+	// Simulate dismissing the first notification (resolve it)
+	app.pendingNotifs[0].Resolved = true
+	app.focus = focusEditor // as notifResolvedMsg would do
+
+	t.Logf("After resolve n1: n1.Resolved=%v n2.Resolved=%v",
+		app.pendingNotifs[0].Resolved, app.pendingNotifs[1].Resolved)
+
+	// Open next notification (should be n2)
+	if !app.openNextNotification() {
+		t.Fatal("should open second notification")
+	}
+	t.Logf("After open next: focus=%d activeIdx=%d activeID=%q cursor=%d",
+		app.focus, app.activeNotifIdx, app.activeNotifID, app.notifActionCursor)
+	t.Logf("n2 actions: %v (len=%d)", app.pendingNotifs[1].Actions, len(app.pendingNotifs[1].Actions))
+
+	if app.activeNotifID != "n2" {
+		t.Errorf("should be on n2, got %q", app.activeNotifID)
+	}
+
+	// Render to see what user sees for n2
+	prompt2 := app.renderNotificationPrompt()
+	t.Logf("Second notification prompt:\n%s", prompt2)
+
+	if !strings.Contains(prompt2, "complete") {
+		t.Error("second notification should show 'complete' action")
+	}
+	if !strings.Contains(prompt2, "dismiss") {
+		t.Error("second notification should show 'dismiss' action")
+	}
+	if !strings.Contains(prompt2, ">") {
+		t.Error("second notification should show cursor on an action")
+	}
+}
+
+func TestNotificationPromptRender(t *testing.T) {
+	s := styles.Default()
+	app := NewApp(nil, s)
+
+	app.pendingNotifs = []agent.Notification{
+		{ID: "n1", Source: "approval", Title: "Shell: rm -rf /", Content: "Agent wants to run rm -rf /", Actions: []string{"yes", "always", "no"}},
+	}
+	app.activeNotifIdx = 0
+	app.activeNotifID = "n1"
+	app.focus = focusNotification
+
+	rendered := app.renderNotificationPrompt()
+	if rendered == "" {
+		t.Fatal("should render notification prompt")
+	}
+	if !strings.Contains(rendered, "Shell: rm -rf /") {
+		t.Error("should contain notification title")
+	}
+	if !strings.Contains(rendered, "Agent wants to run") {
+		t.Error("should contain notification content")
+	}
+	if !strings.Contains(rendered, "yes") {
+		t.Error("should show actions")
+	}
+	if !strings.Contains(rendered, "no") {
+		t.Error("should show all actions")
+	}
+	if !strings.Contains(rendered, ">") {
+		t.Error("should show cursor on selected action")
+	}
+	if !strings.Contains(rendered, "esc") {
+		t.Error("should show esc hint")
 	}
 }

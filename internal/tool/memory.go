@@ -30,6 +30,10 @@ func MemoryWriteTool(workspaceDir string) Tool {
 				return fantasy.ToolResponse{Content: "Error: content is required"}, nil
 			}
 
+			if warning := checkMemoryInjection(input.Content); warning != "" {
+				return fantasy.ToolResponse{Content: "BLOCKED: " + warning}, nil
+			}
+
 			var path string
 			switch input.Type {
 			case "curated":
@@ -59,6 +63,52 @@ func MemoryWriteTool(workspaceDir string) Tool {
 	)
 }
 
+// checkMemoryInjection detects prompt injection patterns in memory content.
+// Memory files are re-injected into system prompts — any role markers,
+// system directives, or instruction-like content could override agent behavior.
+// Returns a description of the problem, or "" if clean.
+func checkMemoryInjection(content string) string {
+	lower := strings.ToLower(content)
+
+	// Role markers that could confuse model context boundaries
+	roleMarkers := []string{
+		"<|system|>", "<|user|>", "<|assistant|>",
+		"[system]", "[inst]", "[/inst]",
+		"<<sys>>", "<</sys>>",
+		"\nsystem:", "\nuser:", "\nassistant:",
+		"human:", "assistant:",
+	}
+	for _, marker := range roleMarkers {
+		if strings.Contains(lower, marker) {
+			return fmt.Sprintf("content contains role marker %q which could be used for prompt injection", marker)
+		}
+	}
+
+	// Instruction-like directives that try to override behavior
+	directives := []string{
+		"ignore previous instructions",
+		"ignore all previous",
+		"disregard previous",
+		"you are now",
+		"new instructions:",
+		"override:",
+		"from now on",
+		"forget everything",
+	}
+	for _, d := range directives {
+		if strings.Contains(lower, d) {
+			return fmt.Sprintf("content contains directive pattern %q which could be used for prompt injection", d)
+		}
+	}
+
+	// Excessive length for a single memory entry
+	if len(content) > 10000 {
+		return "content exceeds 10000 character limit for a single memory entry"
+	}
+
+	return ""
+}
+
 // MemoryWriteDailyOnlyTool creates a memory_write tool restricted to daily logs.
 // Used during memory flush before compaction to prevent accidental MEMORY.md overwrites.
 // Reference: OpenClaw src/auto-reply/reply/memory-flush.ts — append-only guard.
@@ -71,6 +121,9 @@ func MemoryWriteDailyOnlyTool(workspaceDir string) fantasy.AgentTool {
 			}
 			if input.Type != "daily" {
 				return fantasy.ToolResponse{Content: "Error: during memory flush, only type='daily' is allowed"}, nil
+			}
+			if warning := checkMemoryInjection(input.Content); warning != "" {
+				return fantasy.ToolResponse{Content: "BLOCKED: " + warning}, nil
 			}
 
 			memDir := filepath.Join(workspaceDir, "memory")

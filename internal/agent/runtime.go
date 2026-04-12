@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync/atomic"
 
 	"charm.land/fantasy"
@@ -419,11 +421,55 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 						isError: true,
 					}
 				}
-				// Approved — mark tool as approved for rest of session
-				rt.PermChecker.Approve(rt.AgentID, tc.Name)
+				// Only persist approval for the session when user said "always"
+				if result.Persist {
+					rt.PermChecker.Approve(rt.AgentID, tc.Name)
+				}
 			} else {
 				// No approver available — deny by default
 				msg := fmt.Sprintf("permission denied: tool %q requires approval but no approver available", tc.Name)
+				emit(StreamEvent{
+					Type:       EventToolResult,
+					ToolName:   tc.Name,
+					ToolCallID: tc.ID,
+					Output:     msg,
+					AgentID:    rt.AgentID,
+				})
+				return toolResult{
+					output:  fantasy.ToolResultOutputContentText{Text: msg},
+					isError: true,
+				}
+			}
+		}
+	}
+
+	// 2b. Workspace boundary check for file-writing tools
+	if len(rt.WorkspaceRoots) > 0 {
+		if ok, reason := tool.CheckWorkspaceBoundary(tc.Name, effectiveInput, rt.WorkspaceRoots); !ok {
+			if rt.Approver != nil {
+				desc := fmt.Sprintf("Agent %q wants to write outside workspace: %s", rt.AgentID, reason)
+				result, err := rt.Approver.Request(ctx, rt.AgentID, "write_outside_workspace", desc,
+					map[string]any{"tool": tc.Name, "input": effectiveInput, "reason": reason})
+				if err != nil || !result.Approved {
+					msg := "Permission denied: " + reason
+					emit(StreamEvent{
+						Type:       EventToolResult,
+						ToolName:   tc.Name,
+						ToolCallID: tc.ID,
+						Output:     msg,
+						AgentID:    rt.AgentID,
+					})
+					return toolResult{
+						output:  fantasy.ToolResultOutputContentText{Text: msg},
+						isError: true,
+					}
+				}
+				// Approved — extend roots for rest of session
+				if result.Persist {
+					rt.extendWorkspaceRoots(effectiveInput)
+				}
+			} else {
+				msg := "Permission denied: " + reason
 				emit(StreamEvent{
 					Type:       EventToolResult,
 					ToolName:   tc.Name,
@@ -507,6 +553,25 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 	return toolResult{
 		output:  fantasy.ToolResultOutputContentText{Text: outputText},
 		isError: false,
+	}
+}
+
+// extendWorkspaceRoots adds the directory of an approved out-of-bounds write.
+func (rt *ConversationRuntime) extendWorkspaceRoots(input string) {
+	var params map[string]any
+	if json.Unmarshal([]byte(input), &params) != nil {
+		return
+	}
+	for _, key := range []string{"path", "file_path", "file"} {
+		if p, ok := params[key].(string); ok && p != "" {
+			absPath, err := filepath.Abs(p)
+			if err != nil {
+				return
+			}
+			dir := filepath.Dir(filepath.Clean(absPath))
+			rt.WorkspaceRoots = append(rt.WorkspaceRoots, dir)
+			return
+		}
 	}
 }
 

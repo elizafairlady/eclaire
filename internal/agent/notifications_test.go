@@ -192,13 +192,13 @@ func TestNotificationStore_BusIntegration(t *testing.T) {
 	defer cancel()
 	s.SubscribeToBus(ctx, b)
 
-	// Publish a BackgroundResult
+	// Publish a failed BackgroundResult — only errors create notifications
 	b.Publish(bus.TopicBackgroundResult, bus.BackgroundResult{
 		Source:   "cron",
 		TaskName: "daily-report",
 		AgentID:  "research",
-		Status:   "completed",
-		Content:  "Report generated",
+		Status:   "error",
+		Content:  "Connection timeout",
 	})
 
 	// Give the goroutine a moment to process

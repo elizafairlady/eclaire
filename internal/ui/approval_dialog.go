@@ -1,15 +1,11 @@
 package ui
 
 import (
-	"context"
 	"fmt"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
-	"github.com/elizafairlady/eclaire/internal/agent"
-	"github.com/elizafairlady/eclaire/internal/gateway"
 	"github.com/elizafairlady/eclaire/internal/ui/dialog"
 	"github.com/elizafairlady/eclaire/internal/ui/styles"
 )
@@ -22,10 +18,11 @@ type ApprovalRequestMsg struct {
 	Description string
 }
 
-// ApprovalResponseMsg carries the user's Y/N decision back to the gateway.
+// ApprovalResponseMsg carries the user's decision back to the gateway.
 type ApprovalResponseMsg struct {
 	RequestID string
 	Approved  bool
+	Persist   bool // true = "always for session"
 }
 
 // approvalDialog is a dialog that asks the user to approve or deny a tool action.
@@ -57,6 +54,9 @@ func (d *approvalDialog) HandleMsg(msg tea.Msg) dialog.Action {
 		case "y", "Y":
 			d.responseCh <- ApprovalResponseMsg{RequestID: d.requestID, Approved: true}
 			return dialog.CloseAction{}
+		case "a", "A":
+			d.responseCh <- ApprovalResponseMsg{RequestID: d.requestID, Approved: true, Persist: true}
+			return dialog.CloseAction{}
 		case "n", "N", "esc":
 			d.responseCh <- ApprovalResponseMsg{RequestID: d.requestID, Approved: false}
 			return dialog.CloseAction{}
@@ -84,7 +84,7 @@ func (d *approvalDialog) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	prompt := lipgloss.NewStyle().
 		Foreground(styles.FgBase).
 		Bold(true).
-		Render("[Y] Allow  [N] Deny")
+		Render("[Y] Allow once  [A] Always for session  [N] Deny")
 
 	content := title + "\n\n" + body + "\n\n" + prompt
 

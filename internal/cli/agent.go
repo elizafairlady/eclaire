@@ -183,22 +183,18 @@ var agentEditCmd = &cobra.Command{
 
 var agentSpawnCmd = &cobra.Command{
 	Use:   "spawn [agent-type]",
-	Short: "Spawn a new agent",
+	Short: "Spawn a persistent agent session",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// TODO: connect to gateway, spawn agent
-		fmt.Printf("Spawning agent: %s\n", args[0])
-		return nil
+		return fmt.Errorf("not implemented — use 'ecl run -a %s' for agent sessions", args[0])
 	},
 }
 
 var agentKillCmd = &cobra.Command{
-	Use:   "kill [agent-id]",
-	Short: "Kill a running agent",
+	Use:   "kill [session-id]",
+	Short: "Kill a running agent session",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// TODO: connect to gateway, kill agent
-		fmt.Printf("Killing agent: %s\n", args[0])
-		return nil
+		return fmt.Errorf("not implemented — agent session management is pending")
 	},
 }

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -131,7 +130,6 @@ func loadDirWorkspace(wsDir string) map[string]string {
 // yamlAgent wraps AgentDef to implement the Agent interface.
 type yamlAgent struct {
 	def       AgentDef
-	deps      AgentDeps
 	workspace map[string]string // from <dir>/workspace/*.md
 	sourceDir string
 }
@@ -153,23 +151,3 @@ func (a *yamlAgent) IsBuiltIn() bool                   { return false }
 func (a *yamlAgent) EmbeddedWorkspace() map[string]string { return a.workspace }
 func (a *yamlAgent) ModelOverride() string             { return a.def.Model }
 func (a *yamlAgent) SkillsAllowlist() []string         { return a.def.Skills }
-
-func (a *yamlAgent) Init(_ context.Context, deps AgentDeps) error {
-	a.deps = deps
-	return nil
-}
-
-func (a *yamlAgent) Shutdown(_ context.Context) error {
-	return nil
-}
-
-func (a *yamlAgent) Handle(_ context.Context, req Request) (Response, error) {
-	return Response{Content: "use Runner for execution", Done: true}, nil
-}
-
-func (a *yamlAgent) Stream(_ context.Context, _ Request) (<-chan StreamPart, error) {
-	ch := make(chan StreamPart, 1)
-	ch <- StreamPart{Delta: "use Runner for execution", Done: true}
-	close(ch)
-	return ch, nil
-}

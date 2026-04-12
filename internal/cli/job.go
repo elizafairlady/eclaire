@@ -19,7 +19,9 @@ var jobCmd = &cobra.Command{
 
 var (
 	jobAddKind    string
-	jobAddValue   string
+	jobAddAt      string
+	jobAddEvery   string
+	jobAddExpr    string
 	jobAddAgent   string
 	jobAddPrompt  string
 	jobAddName    string
@@ -29,9 +31,9 @@ func init() {
 	jobCmd.AddCommand(jobListCmd, jobAddCmd, jobRemoveCmd, jobRunCmd, jobRunsCmd)
 
 	jobAddCmd.Flags().StringVarP(&jobAddKind, "kind", "k", "", "Schedule kind: at, every, or cron")
-	jobAddCmd.Flags().StringVar(&jobAddValue, "at", "", "Schedule value for 'at' kind (timestamp or duration)")
-	jobAddCmd.Flags().StringVar(&jobAddValue, "every", "", "Schedule value for 'every' kind (duration)")
-	jobAddCmd.Flags().StringVar(&jobAddValue, "expr", "", "Schedule value for 'cron' kind (5-field expression)")
+	jobAddCmd.Flags().StringVar(&jobAddAt, "at", "", "Schedule value for 'at' kind (timestamp or duration)")
+	jobAddCmd.Flags().StringVar(&jobAddEvery, "every", "", "Schedule value for 'every' kind (duration)")
+	jobAddCmd.Flags().StringVar(&jobAddExpr, "expr", "", "Schedule value for 'cron' kind (5-field expression)")
 	jobAddCmd.Flags().StringVarP(&jobAddAgent, "agent", "a", "", "Agent to run")
 	jobAddCmd.Flags().StringVarP(&jobAddPrompt, "prompt", "p", "", "Prompt for the job")
 	jobAddCmd.Flags().StringVarP(&jobAddName, "name", "n", "", "Job name (optional)")
@@ -101,8 +103,20 @@ var jobAddCmd = &cobra.Command{
 				return fmt.Errorf("--prompt is required")
 			}
 		}
-		if jobAddValue == "" {
-			return fmt.Errorf("schedule value is required (--at, --every, or --expr)")
+		// Resolve schedule value from the kind-specific flag
+		var scheduleValue string
+		switch jobAddKind {
+		case "at":
+			scheduleValue = jobAddAt
+		case "every":
+			scheduleValue = jobAddEvery
+		case "cron":
+			scheduleValue = jobAddExpr
+		default:
+			return fmt.Errorf("--kind must be at, every, or cron (got %q)", jobAddKind)
+		}
+		if scheduleValue == "" {
+			return fmt.Errorf("schedule value is required (--%s flag for kind %q)", jobAddKind, jobAddKind)
 		}
 
 		cfg, err := loadConfig()
@@ -121,7 +135,7 @@ var jobAddCmd = &cobra.Command{
 		req := map[string]any{
 			"name":           jobAddName,
 			"schedule_kind":  jobAddKind,
-			"schedule_value": jobAddValue,
+			"schedule_value": scheduleValue,
 			"agent_id":       jobAddAgent,
 			"prompt":         jobAddPrompt,
 		}

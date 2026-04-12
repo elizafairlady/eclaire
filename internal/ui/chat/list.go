@@ -108,6 +108,9 @@ func (l *MessageList) ToggleExpandAll() bool {
 }
 
 // Clear removes all items.
+// Len returns the number of top-level items in the list.
+func (l *MessageList) Len() int { return len(l.items) }
+
 func (l *MessageList) Clear() {
 	l.items = nil
 	l.toolIndex = make(map[string]ToolMessageItem)

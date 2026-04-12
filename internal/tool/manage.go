@@ -921,7 +921,7 @@ func handleDreamingEnable(deps ManageDeps) (fantasy.ToolResponse, error) {
 	if err := deps.DreamingEnable(); err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("dreaming_enable failed: %v", err)), nil
 	}
-	return fantasy.NewTextResponse("Dreaming enabled (light/deep/REM phases)"), nil
+	return fantasy.NewTextResponse("Dreaming enabled (light/deep/REM phases). WARNING: dreaming re-injects LLM-generated output into MEMORY.md and daily logs, which are included in every future system prompt. Memory writes are sanitized against prompt injection patterns, but this is an inherent trust boundary."), nil
 }
 
 func handleDreamingDisable(deps ManageDeps) (fantasy.ToolResponse, error) {

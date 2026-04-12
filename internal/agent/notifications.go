@@ -78,30 +78,29 @@ func NewNotificationStore(path string) (*NotificationStore, error) {
 
 // SubscribeToBus connects the notification store to bus events.
 // Creates notifications from BackgroundResult events.
+// Only errors create notifications — routine completions don't need user attention.
 func (s *NotificationStore) SubscribeToBus(ctx context.Context, b *bus.Bus) {
 	b.SubscribeFunc(ctx, bus.TopicBackgroundResult, func(ev bus.Event) {
 		br, ok := ev.Payload.(bus.BackgroundResult)
 		if !ok {
 			return
 		}
-		sev := SeverityInfo
-		if br.Status == "error" {
-			sev = SeverityWarning
+		// Only notify on errors — successful background work is silent
+		if br.Status != "error" {
+			return
 		}
-		n := Notification{
-			Severity: sev,
+		s.Add(Notification{
+			Severity: SeverityWarning,
 			Source:   br.Source,
-			Title:    fmt.Sprintf("%s: %s", br.Source, br.TaskName),
+			Title:    fmt.Sprintf("%s: %s failed", br.Source, br.TaskName),
 			Content:  br.Content,
 			AgentID:  br.AgentID,
 			RefID:    br.RefID,
-			Actions:  ActionsForSource(br.Source),
-		}
-		s.Add(n)
+		})
 	})
 }
 
-// Add appends a notification. ID and CreatedAt are set automatically if empty.
+// Add appends a notification. ID, CreatedAt, and Actions are set automatically if empty.
 func (s *NotificationStore) Add(n Notification) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -111,6 +110,9 @@ func (s *NotificationStore) Add(n Notification) error {
 	}
 	if n.CreatedAt.IsZero() {
 		n.CreatedAt = time.Now()
+	}
+	if len(n.Actions) == 0 {
+		n.Actions = ActionsForSource(n.Source)
 	}
 
 	s.entries = append(s.entries, n)
@@ -260,6 +262,10 @@ func (s *NotificationStore) load() error {
 	for scanner.Scan() {
 		var n Notification
 		if json.Unmarshal(scanner.Bytes(), &n) == nil {
+			// Backfill actions for notifications persisted before actions were set on Add
+			if len(n.Actions) == 0 {
+				n.Actions = ActionsForSource(n.Source)
+			}
 			s.entries = append(s.entries, n)
 		}
 	}

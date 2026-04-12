@@ -215,23 +215,30 @@ func handleCLIApprovals(ctx context.Context, client *gateway.Client) {
 
 			// Prompt user
 			fmt.Fprintf(os.Stderr, "\n⚡ Approval needed: %s\n", approvalReq.Description)
-			fmt.Fprintf(os.Stderr, "  Allow? [y/N] ")
+			fmt.Fprintf(os.Stderr, "  [y] Allow once  [a] Always for session  [N] Deny: ")
 
 			var answer string
 			fmt.Scanln(&answer)
-			approved := strings.HasPrefix(strings.ToLower(strings.TrimSpace(answer)), "y")
+			answer = strings.ToLower(strings.TrimSpace(answer))
+
+			approved := answer == "y" || answer == "a"
+			persist := answer == "a"
 
 			// Send response
 			resp := map[string]any{
 				"request_id": approvalReq.ID,
 				"approved":   approved,
+				"persist":    persist,
 			}
 			respData, _ := json.Marshal(resp)
 			client.Call(ctx, gateway.MethodApprovalRespond, respData)
 
-			if approved {
-				fmt.Fprintf(os.Stderr, "  ✓ Approved\n")
-			} else {
+			switch {
+			case persist:
+				fmt.Fprintf(os.Stderr, "  ✓ Approved (always for session)\n")
+			case approved:
+				fmt.Fprintf(os.Stderr, "  ✓ Approved (once)\n")
+			default:
 				fmt.Fprintf(os.Stderr, "  ✗ Denied\n")
 			}
 		}

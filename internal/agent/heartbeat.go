@@ -95,8 +95,9 @@ func (e *JobExecutor) SyncHeartbeatJobs(workspaces *WorkspaceLoader) error {
 
 	config := parseHeartbeatConfig(heartbeatMD)
 	if len(config.Tasks) == 0 {
-		// Legacy mode: create a single heartbeat job for the whole file
-		e.ensureLegacyHeartbeatJob(heartbeatMD)
+		// No structured tasks — don't create heartbeat jobs.
+		// The built-in HEARTBEAT.md is a template; it only runs when
+		// the user defines structured tasks (## task: headers).
 		return nil
 	}
 
@@ -172,32 +173,6 @@ func (e *JobExecutor) SyncHeartbeatJobs(workspaces *WorkspaceLoader) error {
 	}
 
 	return nil
-}
-
-func (e *JobExecutor) ensureLegacyHeartbeatJob(heartbeatMD string) {
-	id := heartbeatJobPrefix + "legacy"
-	if _, exists := e.store.Get(id); exists {
-		return
-	}
-
-	j := Job{
-		ID:   id,
-		Name: "heartbeat: legacy",
-		Schedule: JobSchedule{
-			Kind:  ScheduleEvery,
-			Every: "30m",
-		},
-		AgentID:        "orchestrator",
-		Prompt:         "Process this heartbeat checklist:\n\n" + heartbeatMD,
-		SessionTarget:  "isolated",
-		Enabled:        true,
-		DeleteAfterRun: false,
-	}
-	if _, err := e.store.Add(j); err != nil {
-		e.logger.Warn("failed to create legacy heartbeat job", "err", err)
-	} else {
-		e.logger.Info("created legacy heartbeat job")
-	}
 }
 
 // RunBootIfNeeded checks BOOT.md and runs it once per day.

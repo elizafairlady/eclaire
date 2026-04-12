@@ -157,6 +157,9 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 
 	logger.Info("tools registered", "count", len(toolReg.All()))
 
+	// Wire shell executor logger so every command is tracked
+	tool.DefaultExecutor.SetLogger(logger.With("component", "shell"))
+
 	// Register built-in agents first
 	for _, a := range agent.BuiltinAgents() {
 		if rerr := registry.Register(a); rerr != nil {
@@ -802,6 +805,7 @@ func (g *Gateway) handleRequest(c *conn, env Envelope) {
 		var req struct {
 			RequestID string `json:"request_id"`
 			Approved  bool   `json:"approved"`
+			Persist   bool   `json:"persist,omitempty"` // true = "always for session"
 			Reason    string `json:"reason,omitempty"`
 		}
 		if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -810,11 +814,21 @@ func (g *Gateway) handleRequest(c *conn, env Envelope) {
 		}
 		err := g.approvalGate.Respond(req.RequestID, agent.ApprovalResult{
 			Approved: req.Approved,
+			Persist:  req.Persist,
 			Reason:   req.Reason,
 		})
 		if err != nil {
 			g.respond(c, env, nil, &ErrorPayload{Code: 404, Message: err.Error()})
 			return
+		}
+		// Also resolve the corresponding notification if one exists
+		if g.notifications != nil {
+			for _, n := range g.notifications.List(agent.NotificationFilter{Source: "approval", UnreadOnly: true}) {
+				if n.RefID == req.RequestID {
+					g.notifications.Resolve(n.ID)
+					break
+				}
+			}
 		}
 		g.respond(c, env, nil, nil)
 	case MethodGatewayReload:
@@ -955,7 +969,17 @@ func (g *Gateway) handleRequest(c *conn, env Envelope) {
 		g.respond(c, env, data, nil)
 	case MethodNotificationList:
 		if g.notifications != nil {
-			data, _ := json.Marshal(g.notifications.Pending())
+			var filter struct {
+				IncludeResolved bool `json:"include_resolved"`
+			}
+			json.Unmarshal(env.Data, &filter)
+			var notifs []agent.Notification
+			if filter.IncludeResolved {
+				notifs = g.notifications.List(agent.NotificationFilter{})
+			} else {
+				notifs = g.notifications.Pending()
+			}
+			data, _ := json.Marshal(notifs)
 			g.respond(c, env, data, nil)
 		} else {
 			g.respond(c, env, []byte("[]"), nil)
@@ -1788,7 +1812,7 @@ func (g *Gateway) actOnApproval(n *agent.Notification, action string) (map[strin
 		return map[string]string{"status": "approved"}, nil
 
 	case "always":
-		err := g.approvalGate.Respond(n.RefID, agent.ApprovalResult{Approved: true, Reason: "always"})
+		err := g.approvalGate.Respond(n.RefID, agent.ApprovalResult{Approved: true, Persist: true, Reason: "always"})
 		if err != nil {
 			return nil, err
 		}

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,8 +99,12 @@ func TestGatewayStartAndConnect(t *testing.T) {
 	if status.PID == 0 {
 		t.Error("PID should not be zero")
 	}
-	if status.ActiveAgents < 5 {
-		t.Errorf("ActiveAgents = %d, want at least 5 (built-ins)", status.ActiveAgents)
+	// 5 built-in + 1 test-agent from YAML in temp dir = 6
+	if status.ActiveAgents != 6 {
+		t.Errorf("ActiveAgents = %d, want 6 (5 built-in + 1 test YAML agent)", status.ActiveAgents)
+	}
+	if status.MainSessionID == "" {
+		t.Error("MainSessionID should be set on startup")
 	}
 }
 
@@ -125,8 +130,21 @@ func TestGatewayAgentList(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if len(agents) < 5 {
-		t.Errorf("got %d agents, want at least 5", len(agents))
+	// 5 built-in + 1 test-agent from YAML
+	if len(agents) != 6 {
+		t.Errorf("got %d agents, want 6 (5 built-in + 1 test YAML)", len(agents))
+	}
+	// Verify specific built-in IDs are present
+	agentIDs := make(map[string]bool)
+	for _, raw := range agents {
+		var info struct{ ID string `json:"id"` }
+		json.Unmarshal(raw, &info)
+		agentIDs[info.ID] = true
+	}
+	for _, expected := range []string{"orchestrator", "coding", "research", "sysadmin", "config"} {
+		if !agentIDs[expected] {
+			t.Errorf("missing built-in agent %q", expected)
+		}
 	}
 }
 
@@ -144,8 +162,142 @@ func TestGatewayUnknownMethod(t *testing.T) {
 
 	_, err := client.Call(ctx, "nonexistent.method", nil)
 	if err == nil {
-		t.Error("expected error for unknown method")
+		t.Fatal("expected error for unknown method")
 	}
+	if !strings.Contains(err.Error(), "unknown method") {
+		t.Errorf("error = %q, want it to contain 'unknown method'", err.Error())
+	}
+}
+
+func TestGatewayConnect(t *testing.T) {
+	gw, store, eclaireDir := setupTestGateway(t)
+
+	go gw.Start()
+	t.Cleanup(func() { gw.Shutdown() })
+
+	client := connectWithRetry(t, store.SocketPath())
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Connect with CWD — should get back main session ID
+	data, err := client.Call(ctx, MethodConnect, ConnectRequest{CWD: eclaireDir})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	var resp ConnectResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("Unmarshal ConnectResponse: %v", err)
+	}
+
+	if resp.MainSessionID == "" {
+		t.Error("MainSessionID should be set")
+	}
+	t.Logf("Connected: main=%s project=%s", resp.MainSessionID, resp.ProjectSessionID)
+}
+
+func TestGatewaySessionList(t *testing.T) {
+	gw, store, _ := setupTestGateway(t)
+
+	go gw.Start()
+	t.Cleanup(func() { gw.Shutdown() })
+
+	client := connectWithRetry(t, store.SocketPath())
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := client.Call(ctx, MethodSessionList, nil)
+	if err != nil {
+		t.Fatalf("SessionList: %v", err)
+	}
+
+	// Should have at least the main session
+	var sessions []json.RawMessage
+	json.Unmarshal(data, &sessions)
+	if len(sessions) < 1 {
+		t.Errorf("got %d sessions, want at least 1 (main)", len(sessions))
+	}
+	t.Logf("Sessions: %d", len(sessions))
+}
+
+func TestGatewayNotificationList(t *testing.T) {
+	gw, store, _ := setupTestGateway(t)
+
+	go gw.Start()
+	t.Cleanup(func() { gw.Shutdown() })
+
+	client := connectWithRetry(t, store.SocketPath())
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// List with no notifications — should return empty array
+	data, err := client.Call(ctx, MethodNotificationList, nil)
+	if err != nil {
+		t.Fatalf("NotificationList: %v", err)
+	}
+
+	if string(data) != "[]" {
+		t.Logf("Notifications: %s", string(data))
+	}
+}
+
+func TestGatewayJobList(t *testing.T) {
+	gw, store, _ := setupTestGateway(t)
+
+	go gw.Start()
+	t.Cleanup(func() { gw.Shutdown() })
+
+	client := connectWithRetry(t, store.SocketPath())
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := client.Call(ctx, MethodJobList, nil)
+	if err != nil {
+		t.Fatalf("JobList: %v", err)
+	}
+
+	// Should have dreaming jobs (created disabled on startup)
+	var jobs []json.RawMessage
+	json.Unmarshal(data, &jobs)
+	t.Logf("Jobs: %d", len(jobs))
+
+	// Dreaming creates 3 jobs
+	if len(jobs) < 3 {
+		t.Errorf("got %d jobs, want at least 3 (dreaming phases)", len(jobs))
+	}
+}
+
+func TestGatewayToolList(t *testing.T) {
+	gw, store, _ := setupTestGateway(t)
+
+	go gw.Start()
+	t.Cleanup(func() { gw.Shutdown() })
+
+	client := connectWithRetry(t, store.SocketPath())
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := client.Call(ctx, MethodToolList, nil)
+	if err != nil {
+		t.Fatalf("ToolList: %v", err)
+	}
+
+	var tools []json.RawMessage
+	json.Unmarshal(data, &tools)
+	if len(tools) < 20 {
+		t.Errorf("got %d tools, want at least 20", len(tools))
+	}
+	t.Logf("Tools: %d", len(tools))
 }
 
 func TestGatewayShutdown(t *testing.T) {

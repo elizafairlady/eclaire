@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"log/slog"
 
 	"github.com/elizafairlady/eclaire/internal/bus"
@@ -40,28 +39,7 @@ type SectionFeatured interface {
 	SectionFeatures() []SectionFeature
 }
 
-// Request is an input to an agent.
-type Request struct {
-	SessionID string `json:"session_id"`
-	Prompt    string `json:"prompt"`
-	CWD       string `json:"cwd,omitempty"`
-}
-
-// Response is an agent's output.
-type Response struct {
-	Content string `json:"content"`
-	Done    bool   `json:"done"`
-}
-
-// StreamPart is a chunk of streaming output.
-type StreamPart struct {
-	Delta    string `json:"delta,omitempty"`
-	ToolCall string `json:"tool_call,omitempty"`
-	Done     bool   `json:"done"`
-	Error    string `json:"error,omitempty"`
-}
-
-// AgentDeps is injected into agents during Init.
+// AgentDeps is injected into agents during Init (used by Coordinator for lifecycle).
 type AgentDeps struct {
 	Bus    *bus.Bus
 	Config *config.Store
@@ -69,17 +47,12 @@ type AgentDeps struct {
 }
 
 // Agent is the core interface for all agents.
+// It defines what an agent IS (identity, role, tools, workspace).
+// Execution is handled by Runner — agents are definitions, not executors.
 type Agent interface {
 	ID() string
 	Name() string
 	Description() string
-
-	Init(ctx context.Context, deps AgentDeps) error
-	Shutdown(ctx context.Context) error
-
-	Handle(ctx context.Context, req Request) (Response, error)
-	Stream(ctx context.Context, req Request) (<-chan StreamPart, error)
-
 	Role() Role
 	Bindings() []Binding
 	RequiredTools() []string
@@ -95,7 +68,6 @@ type ConfigOverrides interface {
 type BackgroundAgent interface {
 	Agent
 	HeartbeatInterval() int // seconds
-	Heartbeat(ctx context.Context) error
 }
 
 // Status tracks an agent's current state.

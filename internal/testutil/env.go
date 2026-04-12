@@ -228,9 +228,10 @@ func (e *TestEnv) RunAgent(t *testing.T, agentID, prompt string) (*agent.RunResu
 	defer cancel()
 
 	result, err := e.Runner.Run(ctx, agent.RunConfig{
-		AgentID: agentID,
-		Agent:   a,
-		Prompt:  prompt,
+		AgentID:        agentID,
+		Agent:          a,
+		Prompt:         prompt,
+		PermissionMode: tool.PermissionAllow, // tests explicitly bypass permissions
 	}, emit)
 	if err != nil {
 		t.Fatalf("Run(%s, %q): %v", agentID, prompt, err)

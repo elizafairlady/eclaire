@@ -258,21 +258,14 @@ func (e *JobExecutor) executeAndApply(ctx context.Context, j Job) {
 		source = "heartbeat"
 	}
 
-	// Create notification
-	if e.notifications != nil {
-		sev := SeverityInfo
-		title := fmt.Sprintf("Job %s completed", j.Name)
-		content := truncate(result, 1000)
-		if err != nil {
-			sev = SeverityWarning
-			title = fmt.Sprintf("Job %s failed", j.Name)
-			content = err.Error()
-		}
+	// Create notification only for failures — routine completions don't need user attention.
+	// The user can check job history via `ecl job runs`.
+	if e.notifications != nil && err != nil {
 		e.notifications.Add(Notification{
-			Severity: sev,
+			Severity: SeverityWarning,
 			Source:   source,
-			Title:    title,
-			Content:  content,
+			Title:    fmt.Sprintf("Job %s failed", j.Name),
+			Content:  err.Error(),
 			AgentID:  j.AgentID,
 			JobID:    j.ID,
 		})

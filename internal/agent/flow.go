@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/elizafairlady/eclaire/internal/bus"
+	"github.com/elizafairlady/eclaire/internal/tool"
 	"gopkg.in/yaml.v3"
 )
 
@@ -118,10 +119,11 @@ func (e *FlowExecutor) Run(ctx context.Context, def FlowDef, input string, emit 
 
 		// Run the agent
 		result, runErr := e.Runner.Run(ctx, RunConfig{
-			AgentID:    step.Agent,
-			Agent:      a,
-			Prompt:     prompt,
-			PromptMode: PromptModeMinimal,
+			AgentID:        step.Agent,
+			Agent:          a,
+			Prompt:         prompt,
+			PromptMode:     PromptModeMinimal,
+			PermissionMode: tool.PermissionWriteOnly,
 		}, func(ev StreamEvent) error {
 			// Forward sub-events with flow context
 			ev.TaskID = taskID

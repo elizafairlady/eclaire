@@ -252,7 +252,7 @@ func TestBehavior_DayCycle(t *testing.T) {
 	// Verify the model was called with system events in the prompt.
 	// The system events should have been drained and injected as overrides.
 	found := false
-	for _, call := range model.Calls {
+	for _, call := range model.GetCalls() {
 		if len(call.Prompt) > 0 {
 			for _, msg := range call.Prompt {
 				for _, part := range msg.Content {
@@ -316,7 +316,7 @@ func TestBehavior_DayCycle(t *testing.T) {
 	// Verify dreaming called memory tools
 	memoryReadCalled := false
 	memoryWriteCalled := false
-	for _, call := range model.Calls {
+	for _, call := range model.GetCalls() {
 		if len(call.Prompt) > 0 {
 			for _, msg := range call.Prompt {
 				for _, part := range msg.Content {
@@ -348,7 +348,7 @@ func TestBehavior_DayCycle(t *testing.T) {
 	}
 
 	// 2. Multiple model calls happened (boot, work delegation, work summary, awareness, dreaming)
-	totalCalls := len(model.Calls)
+	totalCalls := len(model.GetCalls())
 	t.Logf("Total model calls: %d", totalCalls)
 	if totalCalls < 5 {
 		t.Errorf("expected at least 5 model calls across the day cycle, got %d", totalCalls)

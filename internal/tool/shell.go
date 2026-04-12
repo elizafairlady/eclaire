@@ -1,10 +1,8 @@
 package tool
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"time"
 
 	"charm.land/fantasy"
@@ -34,35 +32,8 @@ func ShellTool() Tool {
 			ctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 
-			cmd := exec.CommandContext(ctx, "bash", "-c", input.Command)
-			if input.CWD != "" {
-				cmd.Dir = input.CWD
-			}
-
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-
-			err := cmd.Run()
-
-			result := stdout.String()
-			if stderr.Len() > 0 {
-				result += "\nSTDERR:\n" + stderr.String()
-			}
-
-			if err != nil {
-				if ctx.Err() == context.DeadlineExceeded {
-					result += fmt.Sprintf("\n[TIMEOUT] Command exceeded %ds timeout. "+
-						"Consider: use a more specific command, add flags to limit output, "+
-						"or increase timeout.", int(timeout.Seconds()))
-				} else if exitErr, ok := err.(*exec.ExitError); ok {
-					result += fmt.Sprintf("\nExit code: %d", exitErr.ExitCode())
-				} else {
-					result += fmt.Sprintf("\nError: %v", err)
-				}
-			}
-
-			return fantasy.ToolResponse{Content: result}, nil
+			r := DefaultExecutor.Run(ctx, input.Command, input.CWD)
+			return fantasy.ToolResponse{Content: r.FormatResult(int(timeout.Seconds()))}, nil
 		},
 	)
 }

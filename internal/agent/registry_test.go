@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"testing"
 )
 
@@ -14,15 +13,9 @@ type stubAgent struct {
 	tools    []string
 }
 
-func (a *stubAgent) ID() string                                              { return a.id }
-func (a *stubAgent) Name() string                                            { return a.name }
-func (a *stubAgent) Description() string                                     { return a.name }
-func (a *stubAgent) Init(_ context.Context, _ AgentDeps) error               { return nil }
-func (a *stubAgent) Shutdown(_ context.Context) error                        { return nil }
-func (a *stubAgent) Handle(_ context.Context, _ Request) (Response, error)   { return Response{}, nil }
-func (a *stubAgent) Stream(_ context.Context, _ Request) (<-chan StreamPart, error) {
-	return nil, nil
-}
+func (a *stubAgent) ID() string              { return a.id }
+func (a *stubAgent) Name() string            { return a.name }
+func (a *stubAgent) Description() string     { return a.name }
 func (a *stubAgent) Role() Role              { return a.role }
 func (a *stubAgent) Bindings() []Binding     { return a.bindings }
 func (a *stubAgent) RequiredTools() []string { return a.tools }

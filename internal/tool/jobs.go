@@ -18,7 +18,8 @@ type BackgroundJob struct {
 	CWD     string
 	stdout  bytes.Buffer
 	stderr  bytes.Buffer
-	done    chan struct{}
+	started chan struct{} // closed after cmd.Start() completes
+	done    chan struct{} // closed after cmd.Wait() completes
 	err     error
 	cmd     *exec.Cmd
 }
@@ -63,13 +64,11 @@ func (m *JobManager) Start(command, cwd string) string {
 		ID:      id,
 		Command: command,
 		CWD:     cwd,
+		started: make(chan struct{}),
 		done:    make(chan struct{}),
 	}
 
-	cmd := exec.Command("bash", "-c", command)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
+	cmd := DefaultExecutor.StartBackground(command, cwd)
 	cmd.Stdout = &job.stdout
 	cmd.Stderr = &job.stderr
 	job.cmd = cmd
@@ -79,7 +78,14 @@ func (m *JobManager) Start(command, cwd string) string {
 	m.mu.Unlock()
 
 	go func() {
-		job.err = cmd.Run()
+		if err := cmd.Start(); err != nil {
+			job.err = err
+			close(job.started)
+			close(job.done)
+			return
+		}
+		close(job.started)
+		job.err = cmd.Wait()
 		close(job.done)
 	}()
 
@@ -104,6 +110,8 @@ func (m *JobManager) Kill(id string) error {
 		return fmt.Errorf("job %q not found", id)
 	}
 
+	// Wait for the process to start before killing
+	<-j.started
 	if j.cmd != nil && j.cmd.Process != nil {
 		return j.cmd.Process.Kill()
 	}

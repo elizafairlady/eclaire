@@ -206,17 +206,25 @@ func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) 
 		ctx = ContextWithProject(ctx, ProjectContext{Root: cfg.ProjectRoot, Dir: cfg.ProjectDir})
 	}
 
-	// Resolve model role
+	// Resolve model: try agent's role via routing table first.
+	// If the agent has a ModelOverride, try that as a routing key first,
+	// then fall back to using it as a direct model identifier.
 	role := string(cfg.Agent.Role())
+	var modelOverride string
 	if co, ok := cfg.Agent.(ConfigOverrides); ok {
-		if m := co.ModelOverride(); m != "" {
-			role = m
-		}
+		modelOverride = co.ModelOverride()
 	}
 
-	// Resolve LanguageModel + context window from provider routing.
-	// This must happen before prompt assembly so we know the context budget.
-	resolution, err := r.Router.ResolveWithContext(ctx, role)
+	resolveRole := role
+	if modelOverride != "" {
+		resolveRole = modelOverride
+	}
+
+	resolution, err := r.Router.ResolveWithContext(ctx, resolveRole)
+	if err != nil && modelOverride != "" && resolveRole != role {
+		// ModelOverride didn't match a route — fall back to the agent's role
+		resolution, err = r.Router.ResolveWithContext(ctx, role)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve model: %w", err)
 	}

@@ -34,8 +34,6 @@ const (
 	MethodAgentList   = "agent.list"
 	MethodAgentStatus = "agent.status"
 	MethodAgentCancel = "agent.cancel"
-	MethodAgentSpawn  = "agent.spawn"
-	MethodAgentKill   = "agent.kill"
 
 	MethodSessionCreate     = "session.create"
 	MethodSessionList       = "session.list"

@@ -21,6 +21,7 @@ type ApprovalRequest struct {
 // ApprovalResult is the human's response.
 type ApprovalResult struct {
 	Approved bool   `json:"approved"`
+	Persist  bool   `json:"persist,omitempty"` // true = approve for rest of session ("always")
 	Reason   string `json:"reason,omitempty"`
 }
 

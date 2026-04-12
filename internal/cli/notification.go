@@ -66,7 +66,12 @@ Actions depend on the notification source:
 		}
 
 		// List notifications
-		data, err := client.Call(ctx, gateway.MethodNotificationList, nil)
+		var filter map[string]any
+		if notifShowAll {
+			filter = map[string]any{"include_resolved": true}
+		}
+		filterData, _ := json.Marshal(filter)
+		data, err := client.Call(ctx, gateway.MethodNotificationList, filterData)
 		if err != nil {
 			return err
 		}

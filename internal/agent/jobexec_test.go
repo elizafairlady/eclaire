@@ -131,7 +131,7 @@ func TestJobExecutor_EveryReschedules(t *testing.T) {
 	}
 }
 
-func TestJobExecutor_NotificationOnComplete(t *testing.T) {
+func TestJobExecutor_NoNotificationOnSuccess(t *testing.T) {
 	store, _, notifs, exec, _ := newJobExecTestEnv(t)
 
 	past := time.Now().Add(-time.Minute)
@@ -153,6 +153,50 @@ func TestJobExecutor_NotificationOnComplete(t *testing.T) {
 	exec.Start(ctx)
 	defer exec.Stop()
 
+	// Wait for job to run (it will be deleted after success since DeleteAfterRun=true)
+	deadline := time.After(3 * time.Second)
+	for {
+		if _, ok := store.Get("notif-job"); !ok {
+			break // job was deleted = it ran successfully
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for job to complete")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// Successful completion should NOT create a notification
+	total, _ := notifs.Count()
+	if total != 0 {
+		all := notifs.List(agent.NotificationFilter{})
+		t.Errorf("expected 0 notifications for successful job, got %d: %v", total, all[0].Title)
+	}
+}
+
+func TestJobExecutor_NotificationOnFailure(t *testing.T) {
+	store, _, notifs, exec, _ := newJobExecTestEnv(t)
+
+	past := time.Now().Add(-time.Minute)
+	// Use a non-existent agent to force a failure
+	store.Add(agent.Job{
+		ID:             "fail-job",
+		Name:           "will-fail",
+		AgentID:        "nonexistent-agent",
+		Prompt:         "do work",
+		DeleteAfterRun: false,
+		Schedule:       agent.JobSchedule{Kind: agent.ScheduleAt, At: "1m"},
+	})
+	store.Update("fail-job", func(j *agent.Job) {
+		j.State.NextRunAt = &past
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	exec.Start(ctx)
+	defer exec.Stop()
+
 	deadline := time.After(3 * time.Second)
 	for {
 		total, _ := notifs.Count()
@@ -161,14 +205,14 @@ func TestJobExecutor_NotificationOnComplete(t *testing.T) {
 		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for notification")
+			t.Fatal("timed out waiting for failure notification")
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
 
 	all := notifs.List(agent.NotificationFilter{})
 	if len(all) == 0 {
-		t.Fatal("expected at least one notification")
+		t.Fatal("expected notification for failed job")
 	}
 	if all[0].Source != "cron" {
 		t.Fatalf("expected source 'cron', got %q", all[0].Source)

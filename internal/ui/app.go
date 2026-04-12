@@ -22,6 +22,7 @@ import (
 
 	"github.com/elizafairlady/eclaire/internal/agent"
 	"github.com/elizafairlady/eclaire/internal/gateway"
+	"github.com/elizafairlady/eclaire/internal/persist"
 	"github.com/elizafairlady/eclaire/internal/tool"
 	"github.com/elizafairlady/eclaire/internal/ui/chat"
 	"github.com/elizafairlady/eclaire/internal/ui/dialog"
@@ -40,6 +41,7 @@ type keyMap struct {
 	NextTab    key.Binding
 	PrevTab    key.Binding
 	CloseTab   key.Binding
+	NewTab     key.Binding
 	Send       key.Binding
 	FocusSwap  key.Binding
 	ScrollUp   key.Binding
@@ -47,6 +49,7 @@ type keyMap struct {
 	ScrollTop  key.Binding
 	ScrollEnd  key.Binding
 	ExpandAll  key.Binding
+	NextNotif  key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -55,6 +58,7 @@ func defaultKeyMap() keyMap {
 		NextTab:    key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "next tab")),
 		PrevTab:    key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "prev tab")),
 		CloseTab:   key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("ctrl+w", "close tab")),
+		NewTab:     key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "sessions")),
 		Send:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		FocusSwap:  key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "focus")),
 		ScrollUp:   key.NewBinding(key.WithKeys("pgup", "shift+up"), key.WithHelp("pgup", "scroll up")),
@@ -62,6 +66,7 @@ func defaultKeyMap() keyMap {
 		ScrollTop:  key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
 		ScrollEnd:  key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 		ExpandAll:  key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand/collapse all")),
+		NextNotif:  key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "next notification")),
 	}
 }
 
@@ -75,15 +80,6 @@ type Tab struct {
 	Closable  bool
 }
 
-// --- Chat entry ---
-
-type chatEntry struct {
-	kind    string // "user", "assistant", "tool_call", "tool_result", "system"
-	content string
-	agentID string // which agent produced this entry
-	taskID  string // sub-agent task ID (for grouping)
-	depth   int    // 0 = top-level, 1 = sub-agent
-}
 
 // --- Active tasks ---
 
@@ -123,6 +119,8 @@ type uiFocus uint8
 const (
 	focusEditor uiFocus = iota
 	focusMain
+	focusNotification // viewing a notification's details + actions in the editor area
+	focusSessionPicker // selecting an existing session to resume as a tab
 )
 
 // --- Bubble Tea messages ---
@@ -138,7 +136,7 @@ type sessionIDMsg struct {
 	tabID     string
 	sessionID string
 }
-type notificationDrainMsg []agent.Notification
+type notificationListMsg []agent.Notification
 type gatewayEventMsg gateway.Envelope
 type errorMsg struct{ Err error }
 type spinnerTickMsg struct{}
@@ -174,7 +172,6 @@ type App struct {
 
 	// Chat state per tab (keyed by Tab.ID)
 	chatLists   map[string]*chat.MessageList
-	chatMsgs    map[string][]chatEntry         // legacy, kept for non-tool messages during transition
 	streaming   map[string]string
 	busy        map[string]bool
 	busyStatus  map[string]string // what the tab's agent is doing right now
@@ -219,6 +216,16 @@ type App struct {
 
 	// Approval flow
 	approvalCh chan ApprovalResponseMsg
+
+	// Pending notifications (fetched on connect, updated via events)
+	pendingNotifs      []agent.Notification
+	activeNotifIdx     int    // index into pendingNotifs when focusNotification is active
+	activeNotifID      string // ID of the notification being viewed
+	notifActionCursor  int    // which action is highlighted in notification focus mode
+
+	// Session picker state
+	sessionPickerItems  []persist.SessionMeta
+	sessionPickerCursor int
 }
 
 // AppOptions configures optional App behavior.
@@ -304,7 +311,6 @@ func NewApp(gw *gateway.Client, s styles.Styles, opts ...AppOptions) *App {
 		focus:       focusEditor,
 		tabs:        tabs,
 		chatLists:   make(map[string]*chat.MessageList),
-		chatMsgs:    make(map[string][]chatEntry),
 		streaming:   make(map[string]string),
 		busy:        make(map[string]bool),
 		busyStatus:  make(map[string]string),
@@ -338,7 +344,7 @@ func (m *App) Init() tea.Cmd {
 		m.fetchAgents(),
 		m.listenEvents(),
 		m.listenApprovals(),
-		m.drainNotifications(),
+		m.fetchNotifications(),
 	)
 }
 
@@ -352,8 +358,7 @@ func (m *App) injectBriefing() {
 	if err != nil || len(data) == 0 {
 		return
 	}
-	m.chatMsgs["main"] = append(m.chatMsgs["main"],
-		chatEntry{kind: "system", content: string(data)})
+	m.chatList("main").Add(chat.NewSystemMessage("briefing-"+today, string(data)))
 }
 
 func (m *App) listenApprovals() tea.Cmd {
@@ -422,7 +427,7 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case notificationDrainMsg:
+	case notificationListMsg:
 		// Store pending notifications for sidebar display.
 		// User navigates to them when ready — never forced.
 		m.pendingNotifs = []agent.Notification(msg)
@@ -446,10 +451,39 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.gw.Call(ctx, gateway.MethodApprovalRespond, map[string]any{
 					"request_id": msg.RequestID,
 					"approved":   msg.Approved,
+					"persist":    msg.Persist,
 				})
 			}()
 		}
 		cmds = append(cmds, m.listenApprovals())
+
+	case sessionPickerMsg:
+		// Filter to resumable sessions (not main, not archived)
+		var items []persist.SessionMeta
+		for _, s := range msg {
+			if s.Kind == "main" || s.Status == "archived" {
+				continue
+			}
+			items = append(items, s)
+		}
+		m.sessionPickerItems = items
+		m.sessionPickerCursor = 0
+		m.focus = focusSessionPicker
+		m.textarea.Blur()
+
+	case notifResolvedMsg:
+		// Mark notification as resolved locally and exit notification focus
+		for i := range m.pendingNotifs {
+			if m.pendingNotifs[i].ID == msg.ID {
+				m.pendingNotifs[i].Resolved = true
+				break
+			}
+		}
+		if m.focus == focusNotification {
+			m.focus = focusEditor
+		}
+		tabID := m.activeTabID()
+		m.addSystemMsg(tabID, fmt.Sprintf("Notification %s: %s", msg.ID, msg.Action))
 
 	case errorMsg:
 		tabID := m.activeTabID()
@@ -522,8 +556,14 @@ func (m *App) Draw(scr uv.Screen, area uv.Rectangle) {
 		m.drawSidebar(scr, m.layout.sidebar)
 	}
 
-	editorView := m.textarea.View()
-	uv.NewStyledString(editorView).Draw(scr, m.layout.editor)
+	switch m.focus {
+	case focusNotification:
+		uv.NewStyledString(m.renderNotificationPrompt()).Draw(scr, m.layout.editor)
+	case focusSessionPicker:
+		uv.NewStyledString(m.renderSessionPicker()).Draw(scr, m.layout.editor)
+	default:
+		uv.NewStyledString(m.textarea.View()).Draw(scr, m.layout.editor)
+	}
 
 	m.drawStatus(scr, m.layout.status)
 
@@ -541,6 +581,37 @@ func (m *App) generateLayout(w, h int) uiLayout {
 	headerHeight := 2
 	statusHeight := 1
 	editorHeight := m.textarea.Height()
+
+	// When viewing a notification, expand the editor area to fit the notification
+	// content + action menu + hint line.
+	if m.focus == focusNotification && m.activeNotifIdx < len(m.pendingNotifs) {
+		n := m.pendingNotifs[m.activeNotifIdx]
+		// title + content + blank + actions + hint = at least 4 + len(actions)
+		needed := 4 + len(n.Actions)
+		if n.Content != "" {
+			needed++
+		}
+		if needed > editorHeight {
+			editorHeight = needed
+		}
+		// Cap at half the terminal height
+		maxEditor := h / 2
+		if editorHeight > maxEditor {
+			editorHeight = maxEditor
+		}
+	}
+
+	// Session picker also needs expanded editor area
+	if m.focus == focusSessionPicker {
+		needed := 4 + len(m.sessionPickerItems) // title + blank + "New session" + sessions
+		if needed > editorHeight {
+			editorHeight = needed
+		}
+		maxEditor := h / 2
+		if editorHeight > maxEditor {
+			editorHeight = maxEditor
+		}
+	}
 
 	regions := layout.Vertical(
 		layout.Len(headerHeight),
@@ -633,21 +704,18 @@ func (m *App) drawChat(scr uv.Screen, area uv.Rectangle) {
 	cl := m.chatList(tabID)
 	cl.SetSize(chatWidth, chatHeight)
 
-	// Build streaming text with busy indicator
+	// Build streaming text with busy indicator.
+	// Spinner only shows when waiting (no tokens yet). Once text is streaming, hide it.
 	streamText := ""
 	if text, ok := m.streaming[tabID]; ok && text != "" {
-		streamText = m.styles.AssistantBody.Render(text)
-	}
-	if m.busy[tabID] {
-		if streamText != "" {
-			streamText += "\n"
-		}
+		streamText = m.markdown.Render(text, chatWidth-4)
+	} else if m.busy[tabID] {
 		frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
 		status := m.busyStatus[tabID]
 		if status == "" {
 			status = "thinking..."
 		}
-		streamText += m.styles.AgentWaiting.Render("  " + frame + " " + status)
+		streamText = m.styles.AgentWaiting.Render("  " + frame + " " + status)
 	}
 
 	content := cl.Render(streamText)
@@ -788,6 +856,42 @@ func (m *App) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 		}
 	}
 
+	// --- NOTIFICATIONS ---
+	if len(m.pendingNotifs) > 0 {
+		unresolved := 0
+		for _, n := range m.pendingNotifs {
+			if !n.Resolved {
+				unresolved++
+			}
+		}
+		if unresolved > 0 {
+			b.WriteString(m.styles.SectionTitle.Render(fmt.Sprintf(" NOTIFS (%d)", unresolved)) + "\n")
+			shown := 0
+			for _, n := range m.pendingNotifs {
+				if n.Resolved || shown >= 5 {
+					continue
+				}
+				icon := " "
+				switch n.Source {
+				case "approval":
+					icon = m.styles.SystemMsg.Render("!")
+				case "reminder":
+					icon = m.styles.Muted.Render("R")
+				}
+				title := n.Title
+				if len(title) > maxW-6 {
+					title = title[:maxW-6] + "…"
+				}
+				b.WriteString(fmt.Sprintf(" %s %s %s\n", icon, m.styles.Muted.Render(n.ID), title))
+				if len(n.Actions) > 0 {
+					b.WriteString(fmt.Sprintf("   [%s]\n", strings.Join(n.Actions, "/")))
+				}
+				shown++
+			}
+			b.WriteByte('\n')
+		}
+	}
+
 	// --- ACTIVITY ---
 	b.WriteString(m.styles.SectionTitle.Render(" ACTIVITY") + "\n")
 
@@ -872,62 +976,40 @@ func sameDay(a, b time.Time) bool {
 	return a.Year() == b.Year() && a.YearDay() == b.YearDay()
 }
 
-func (m *App) renderChatEntry(e chatEntry) string {
-	indent := "  "
-	if e.depth > 0 {
-		indent = "    │ "
-	}
-
-	switch e.kind {
-	case "user":
-		content := m.styles.UserLabel.Render("you") + "\n" + e.content
-		return m.styles.UserBorder.Render(content)
-	case "assistant":
-		width := 80
-		if m.layout.main.Dx() > 4 {
-			width = m.layout.main.Dx() - 4
-		}
-		return m.markdown.Render(e.content, width)
-	case "tool_call":
-		icon := m.styles.ToolPendingIcon.Render(styles.ToolPending)
-		name := m.styles.ToolName.Render(e.content)
-		if e.depth > 0 {
-			agent := m.styles.Muted.Render("[" + e.agentID + "]")
-			return indent + icon + " " + name + " " + agent
-		}
-		return indent + icon + " " + name
-	case "tool_result":
-		lines := strings.Split(e.content, "\n")
-		if e.depth > 0 && len(lines) > 5 {
-			hidden := len(lines) - 5
-			lines = append(lines[:5], m.styles.Muted.Render(fmt.Sprintf("… (%d lines hidden)", hidden)))
-		} else if len(lines) > 10 {
-			hidden := len(lines) - 10
-			lines = append(lines[:10], m.styles.Muted.Render(fmt.Sprintf("… (%d lines hidden)", hidden)))
-		}
-		body := strings.Join(lines, "\n")
-		if e.depth > 0 {
-			return indent + m.styles.ToolBody.Render(body)
-		}
-		return m.styles.ToolBody.Render(body)
-	case "system":
-		return m.styles.SystemMsg.Render(e.content)
-	default:
-		return e.content
-	}
-}
-
 func (m *App) drawStatus(scr uv.Screen, area uv.Rectangle) {
-	left := m.styles.HelpKey.Render("enter") + m.styles.HelpDesc.Render(" send  ") +
-		m.styles.HelpKey.Render("tab") + m.styles.HelpDesc.Render(" focus  ") +
-		m.styles.HelpKey.Render("ctrl+o") + m.styles.HelpDesc.Render(" expand  ") +
-		m.styles.HelpKey.Render("ctrl+n/p") + m.styles.HelpDesc.Render(" tabs  ") +
-		m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpDesc.Render(" quit")
+	var left string
+
+	switch m.focus {
+	case focusNotification:
+		left = m.styles.HelpKey.Render("↑↓") + m.styles.HelpDesc.Render(" select  ") +
+			m.styles.HelpKey.Render("enter") + m.styles.HelpDesc.Render(" confirm  ") +
+			m.styles.HelpKey.Render("ctrl+j") + m.styles.HelpDesc.Render(" next  ") +
+			m.styles.HelpKey.Render("esc") + m.styles.HelpDesc.Render(" cancel")
+	case focusSessionPicker:
+		left = m.styles.HelpKey.Render("↑↓") + m.styles.HelpDesc.Render(" select  ") +
+			m.styles.HelpKey.Render("enter") + m.styles.HelpDesc.Render(" resume  ") +
+			m.styles.HelpKey.Render("esc") + m.styles.HelpDesc.Render(" cancel")
+	default:
+		left = m.styles.HelpKey.Render("enter") + m.styles.HelpDesc.Render(" send  ") +
+			m.styles.HelpKey.Render("tab") + m.styles.HelpDesc.Render(" focus  ") +
+			m.styles.HelpKey.Render("ctrl+j") + m.styles.HelpDesc.Render(" notif  ") +
+			m.styles.HelpKey.Render("ctrl+n/p") + m.styles.HelpDesc.Render(" tabs  ") +
+			m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpDesc.Render(" quit")
+	}
 
 	right := ""
-	if len(m.agents) > 0 {
+	unresolved := 0
+	for _, n := range m.pendingNotifs {
+		if !n.Resolved {
+			unresolved++
+		}
+	}
+	if unresolved > 0 {
+		right = m.styles.SystemMsg.Render(fmt.Sprintf(" %d notif ", unresolved))
+	} else if len(m.agents) > 0 {
 		right = m.styles.Muted.Render(fmt.Sprintf("%d agents", len(m.agents)))
 	}
+
 	gap := area.Dx() - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
 		gap = 0
@@ -938,6 +1020,98 @@ func (m *App) drawStatus(scr uv.Screen, area uv.Rectangle) {
 // --- Key handling ---
 
 func (m *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	// Notification focus mode: arrow keys navigate actions, enter selects, esc cancels, ctrl+j cycles
+	if m.focus == focusNotification {
+		switch {
+		case msg.String() == "esc":
+			m.focus = focusEditor
+			m.textarea.Focus()
+			return nil, true
+		case key.Matches(msg, m.keys.NextNotif):
+			m.cycleToNextNotification()
+			m.notifActionCursor = 0
+			return nil, true
+		case msg.String() == "up" || msg.String() == "k":
+			if m.activeNotifIdx < len(m.pendingNotifs) {
+				n := m.pendingNotifs[m.activeNotifIdx]
+				if m.notifActionCursor > 0 {
+					m.notifActionCursor--
+				} else {
+					m.notifActionCursor = len(n.Actions) - 1
+				}
+			}
+			return nil, true
+		case msg.String() == "down" || msg.String() == "j":
+			if m.activeNotifIdx < len(m.pendingNotifs) {
+				n := m.pendingNotifs[m.activeNotifIdx]
+				if m.notifActionCursor < len(n.Actions)-1 {
+					m.notifActionCursor++
+				} else {
+					m.notifActionCursor = 0
+				}
+			}
+			return nil, true
+		case msg.String() == "enter":
+			if m.activeNotifIdx < len(m.pendingNotifs) {
+				n := m.pendingNotifs[m.activeNotifIdx]
+				if m.notifActionCursor < len(n.Actions) {
+					action := n.Actions[m.notifActionCursor]
+					m.focus = focusEditor
+					m.textarea.Focus()
+					return m.actOnNotification(n.ID, action), true
+				}
+			}
+			return nil, true
+		}
+		return nil, true // consume all other keys in notification mode
+	}
+
+	// Session picker mode: arrow keys navigate, enter resumes/creates session, esc cancels
+	// Item 0 = "New session", items 1..N = existing sessions
+	if m.focus == focusSessionPicker {
+		totalItems := 1 + len(m.sessionPickerItems)
+		switch {
+		case msg.String() == "esc":
+			m.focus = focusEditor
+			m.textarea.Focus()
+			return nil, true
+		case msg.String() == "up" || msg.String() == "k":
+			if m.sessionPickerCursor > 0 {
+				m.sessionPickerCursor--
+			} else {
+				m.sessionPickerCursor = totalItems - 1
+			}
+			return nil, true
+		case msg.String() == "down" || msg.String() == "j":
+			if m.sessionPickerCursor < totalItems-1 {
+				m.sessionPickerCursor++
+			} else {
+				m.sessionPickerCursor = 0
+			}
+			return nil, true
+		case msg.String() == "enter":
+			m.focus = focusEditor
+			m.textarea.Focus()
+			if m.sessionPickerCursor == 0 {
+				// New session — create tab with empty SessionID
+				m.tabs = append(m.tabs, Tab{
+					ID:       fmt.Sprintf("new-%d", time.Now().UnixNano()),
+					Label:    "new",
+					AgentID:  "orchestrator",
+					Closable: true,
+				})
+				m.activeTab = len(m.tabs) - 1
+				return nil, true
+			}
+			sessIdx := m.sessionPickerCursor - 1
+			if sessIdx < len(m.sessionPickerItems) {
+				return m.openSessionTab(m.sessionPickerItems[sessIdx]), true
+			}
+			return nil, true
+		}
+		return nil, true
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return tea.Quit, true
@@ -958,6 +1132,9 @@ func (m *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			}
 		}
 		return nil, true
+
+	case key.Matches(msg, m.keys.NewTab):
+		return m.openSessionPicker(), true
 
 	case key.Matches(msg, m.keys.FocusSwap):
 		if m.focus == focusEditor {
@@ -1002,9 +1179,46 @@ func (m *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	case key.Matches(msg, m.keys.ExpandAll):
 		m.chatList(m.activeTabID()).ToggleExpandAll()
 		return nil, true
+
+	case key.Matches(msg, m.keys.NextNotif):
+		if m.openNextNotification() {
+			return nil, true
+		}
 	}
 
 	return nil, false
+}
+
+// openNextNotification finds the first unresolved notification and enters notification focus.
+// Returns true if a notification was found.
+func (m *App) openNextNotification() bool {
+	for i, n := range m.pendingNotifs {
+		if !n.Resolved {
+			m.activeNotifIdx = i
+			m.activeNotifID = n.ID
+			m.notifActionCursor = 0
+			m.focus = focusNotification
+			m.textarea.Blur()
+			return true
+		}
+	}
+	return false
+}
+
+// cycleToNextNotification moves to the next unresolved notification after the current one.
+func (m *App) cycleToNextNotification() {
+	start := m.activeNotifIdx + 1
+	for i := 0; i < len(m.pendingNotifs); i++ {
+		idx := (start + i) % len(m.pendingNotifs)
+		if !m.pendingNotifs[idx].Resolved {
+			m.activeNotifIdx = idx
+			m.activeNotifID = m.pendingNotifs[idx].ID
+			return
+		}
+	}
+	// No more unresolved — exit notification mode
+	m.focus = focusEditor
+	m.textarea.Focus()
 }
 
 // --- Sending messages ---
@@ -1056,8 +1270,9 @@ func (m *App) runStream(tabID string, tab Tab, prompt string) {
 				m.streamCh <- streamEventMsg{tabID: tabID, event: ev}
 			}
 		case gateway.TypeResponse:
-			// Capture session ID from final response for conversation continuity
-			if env.Error == nil && env.Data != nil {
+			if env.Error != nil {
+				m.streamCh <- errorMsg{Err: fmt.Errorf("%s", env.Error.Message)}
+			} else if env.Data != nil {
 				var resp struct {
 					SessionID string `json:"session_id"`
 				}
@@ -1203,19 +1418,53 @@ func (m *App) handleSlashCommand(text string) tea.Cmd {
 	switch cmd {
 	case "/clear":
 		m.chatList(tabID).Clear()
-		m.chatMsgs[tabID] = nil
 		delete(m.streaming, tabID)
 	case "/status":
 		return m.showStatusInline(tabID)
 	case "/agents":
 		return m.showAgentsInline(tabID)
-	case "/open":
-		if len(args) > 0 {
-			return m.openAgentTab(args[0])
-		}
-		m.addSystemMsg(tabID, "Usage: /open <agent-id>")
+	case "/sessions":
+		return m.openSessionPicker()
 	case "/tools":
 		return m.fetchToolsIntoChat(tabID)
+	case "/notif":
+		if len(args) == 0 {
+			// List notifications inline
+			if len(m.pendingNotifs) == 0 {
+				m.addSystemMsg(tabID, "No pending notifications.")
+			} else {
+				var sb strings.Builder
+				for i, n := range m.pendingNotifs {
+					if n.Resolved {
+						continue
+					}
+					sb.WriteString(fmt.Sprintf("  %d. [%s] %s (%s)", i, n.ID, n.Title, n.Source))
+					if len(n.Actions) > 0 {
+						sb.WriteString(fmt.Sprintf(" [%s]", strings.Join(n.Actions, "/")))
+					}
+					sb.WriteByte('\n')
+				}
+				m.addSystemMsg(tabID, sb.String())
+			}
+		} else if len(args) >= 1 {
+			// Open notification for action: /notif <id> [action]
+			notifID := args[0]
+			if len(args) >= 2 {
+				// Direct action: /notif <id> <action>
+				return m.actOnNotification(notifID, args[1])
+			}
+			// Show notification details and enter notification focus mode
+			for i, n := range m.pendingNotifs {
+				if n.ID == notifID {
+					m.activeNotifIdx = i
+					m.activeNotifID = n.ID
+					m.notifActionCursor = 0
+					m.focus = focusNotification
+					m.textarea.Blur()
+					break
+				}
+			}
+		}
 	case "/scope":
 		if len(args) > 0 {
 			m.scope = args[0]
@@ -1292,6 +1541,163 @@ func (m *App) addSystemMsg(tabID, text string) {
 	m.chatList(tabID).Add(chat.NewSystemMessage("sys_"+fmt.Sprintf("%d", time.Now().UnixNano()), text))
 }
 
+// actOnNotification sends an action to the gateway for a notification.
+func (m *App) actOnNotification(notifID, action string) tea.Cmd {
+	if m.gw == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req := gateway.NotificationActRequest{
+			ID:     notifID,
+			Action: action,
+		}
+		_, err := m.gw.Call(ctx, gateway.MethodNotificationAct, req)
+		if err != nil {
+			return errorMsg{Err: err}
+		}
+		// Mark as resolved locally
+		return notifResolvedMsg{ID: notifID, Action: action}
+	}
+}
+
+// notifResolvedMsg is sent when a notification action completes.
+type notifResolvedMsg struct {
+	ID     string
+	Action string
+}
+
+// renderNotificationPrompt renders the notification detail view that replaces the editor.
+// Shows a selectable menu of actions — arrow keys navigate, enter selects.
+func (m *App) renderNotificationPrompt() string {
+	if m.activeNotifIdx >= len(m.pendingNotifs) {
+		m.focus = focusEditor
+		return ""
+	}
+	n := m.pendingNotifs[m.activeNotifIdx]
+	if n.ID != m.activeNotifID {
+		m.focus = focusEditor
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(m.styles.SectionTitle.Render(fmt.Sprintf(" [%s] %s ", n.Source, n.Title)))
+	sb.WriteByte('\n')
+	if n.Content != "" {
+		sb.WriteString(" " + n.Content)
+		sb.WriteByte('\n')
+	}
+	sb.WriteByte('\n')
+	for i, action := range n.Actions {
+		if i == m.notifActionCursor {
+			sb.WriteString(m.styles.ToolName.Render(fmt.Sprintf(" > %s", action)))
+		} else {
+			sb.WriteString(m.styles.Muted.Render(fmt.Sprintf("   %s", action)))
+		}
+		sb.WriteByte('\n')
+	}
+	sb.WriteString(m.styles.Muted.Render(" ↑↓ navigate  enter select  esc cancel  ctrl+j next"))
+	return sb.String()
+}
+
+// openSessionPicker fetches sessions from the gateway and enters session picker mode.
+func (m *App) openSessionPicker() tea.Cmd {
+	if m.gw == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		data, err := m.gw.Call(ctx, gateway.MethodSessionList, nil)
+		if err != nil {
+			return nil
+		}
+		var sessions []persist.SessionMeta
+		json.Unmarshal(data, &sessions)
+		return sessionPickerMsg(sessions)
+	}
+}
+
+// sessionPickerMsg carries fetched sessions into the Update loop.
+type sessionPickerMsg []persist.SessionMeta
+
+// renderSessionPicker renders the session list that replaces the editor.
+// Item 0 is always "New session". Existing sessions follow.
+func (m *App) renderSessionPicker() string {
+	var sb strings.Builder
+	sb.WriteString(m.styles.SectionTitle.Render(" Sessions"))
+	sb.WriteByte('\n')
+	sb.WriteByte('\n')
+
+	// First item: new session
+	if m.sessionPickerCursor == 0 {
+		sb.WriteString(m.styles.ToolName.Render(" > + New session"))
+	} else {
+		sb.WriteString(m.styles.Muted.Render("   + New session"))
+	}
+	sb.WriteByte('\n')
+
+	for i, s := range m.sessionPickerItems {
+		short := s.ID
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		if len(title) > 40 {
+			title = title[:40] + "…"
+		}
+		age := time.Since(s.UpdatedAt).Truncate(time.Minute)
+		label := fmt.Sprintf("%-8s %-12s %-42s %s ago", short, s.AgentID, title, age)
+		if s.ProjectRoot != "" {
+			proj := s.ProjectRoot
+			if idx := strings.LastIndex(proj, "/"); idx >= 0 {
+				proj = proj[idx+1:]
+			}
+			label += " [" + proj + "]"
+		}
+		if i+1 == m.sessionPickerCursor { // +1 because "New session" is item 0
+			sb.WriteString(m.styles.ToolName.Render(" > " + label))
+		} else {
+			sb.WriteString(m.styles.Muted.Render("   " + label))
+		}
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// openSessionTab creates or switches to a tab for the given session.
+func (m *App) openSessionTab(sess persist.SessionMeta) tea.Cmd {
+	// Check if tab already exists for this session
+	for i, tab := range m.tabs {
+		if tab.SessionID == sess.ID {
+			m.activeTab = i
+			return nil
+		}
+	}
+
+	label := sess.Title
+	if label == "" {
+		label = sess.ID
+	}
+	if len(label) > 20 {
+		label = label[:20]
+	}
+
+	m.tabs = append(m.tabs, Tab{
+		ID:        sess.ID,
+		Label:     label,
+		AgentID:   sess.AgentID,
+		SessionID: sess.ID,
+		Closable:  true,
+	})
+	m.activeTab = len(m.tabs) - 1
+	return nil
+}
+
 func (m *App) showStatusInline(tabID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1316,8 +1722,7 @@ func (m *App) showStatusInline(tabID string) tea.Cmd {
 			}
 			sb.WriteString(fmt.Sprintf("  %s %-14s %-8s %s%s\n", icon, a.ID, a.Role, string(a.Status), bi))
 		}
-		m.chatMsgs[tabID] = append(m.chatMsgs[tabID],
-			chatEntry{kind: "system", content: sb.String()})
+		m.chatList(tabID).Add(chat.NewSystemMessage("sys-"+tabID, sb.String()))
 		return nil
 	}
 }
@@ -1339,8 +1744,7 @@ func (m *App) showAgentsInline(tabID string) tea.Cmd {
 			sb.WriteString(fmt.Sprintf("  %-14s %s\n", a.ID, a.Description))
 		}
 		sb.WriteString("\nUse /open <agent-id> to open a direct chat tab.")
-		m.chatMsgs[tabID] = append(m.chatMsgs[tabID],
-			chatEntry{kind: "system", content: sb.String()})
+		m.chatList(tabID).Add(chat.NewSystemMessage("sys-"+tabID, sb.String()))
 		return nil
 	}
 }
@@ -1366,31 +1770,12 @@ func (m *App) fetchToolsIntoChat(tabID string) tea.Cmd {
 			}
 			sb.WriteString(fmt.Sprintf("  %-15s %-8s %s\n", t.Name, t.Category, tier))
 		}
-		m.chatMsgs[tabID] = append(m.chatMsgs[tabID],
-			chatEntry{kind: "system", content: sb.String()})
+		m.chatList(tabID).Add(chat.NewSystemMessage("sys-"+tabID, sb.String()))
 		return nil
 	}
 }
 
 // --- Tab management ---
-
-func (m *App) openAgentTab(agentID string) tea.Cmd {
-	// Check for existing tab with this ID (agent tabs use agentID as tab ID)
-	for i, tab := range m.tabs {
-		if tab.ID == agentID {
-			m.activeTab = i
-			return nil
-		}
-	}
-	m.tabs = append(m.tabs, Tab{
-		ID:       agentID,
-		Label:    agentID,
-		AgentID:  agentID,
-		Closable: true,
-	})
-	m.activeTab = len(m.tabs) - 1
-	return nil
-}
 
 // --- Gateway commands ---
 
@@ -1408,7 +1793,7 @@ func (m *App) fetchAgents() tea.Cmd {
 	}
 }
 
-func (m *App) drainNotifications() tea.Cmd {
+func (m *App) fetchNotifications() tea.Cmd {
 	if m.gw == nil {
 		return nil
 	}
@@ -1425,7 +1810,7 @@ func (m *App) drainNotifications() tea.Cmd {
 		if json.Unmarshal(data, &notifs) != nil || len(notifs) == 0 {
 			return nil
 		}
-		return notificationDrainMsg(notifs)
+		return notificationListMsg(notifs)
 	}
 }
 

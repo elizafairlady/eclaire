@@ -1,7 +1,5 @@
 package agent
 
-import "context"
-
 // builtinAgent is a Go-defined agent with embedded workspace defaults.
 type builtinAgent struct {
 	id                string
@@ -18,8 +16,6 @@ type builtinAgent struct {
 func (a *builtinAgent) ID() string            { return a.id }
 func (a *builtinAgent) Name() string          { return a.name }
 func (a *builtinAgent) Description() string   { return a.description }
-func (a *builtinAgent) Init(_ context.Context, _ AgentDeps) error { return nil }
-func (a *builtinAgent) Shutdown(_ context.Context) error          { return nil }
 func (a *builtinAgent) Role() Role            { return a.role }
 func (a *builtinAgent) Bindings() []Binding   { return nil }
 func (a *builtinAgent) RequiredTools() []string { return a.tools }
@@ -36,16 +32,6 @@ func (a *builtinAgent) SystemPrompt() string {
 		return soul
 	}
 	return ""
-}
-
-func (a *builtinAgent) Handle(_ context.Context, _ Request) (Response, error) {
-	return Response{Content: "use Runner for execution", Done: true}, nil
-}
-func (a *builtinAgent) Stream(_ context.Context, _ Request) (<-chan StreamPart, error) {
-	ch := make(chan StreamPart, 1)
-	ch <- StreamPart{Delta: "use Runner for execution", Done: true}
-	close(ch)
-	return ch, nil
 }
 
 // OrchestratorAgent is Claire — the Executive Assistant orchestrator.
