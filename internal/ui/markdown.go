@@ -166,8 +166,11 @@ func (r *markdownRenderer) Render(content string, width int) string {
 	if width < 20 {
 		width = 20
 	}
-	// Round to nearest 10 to bound cache size
-	width = ((width + 5) / 10) * 10
+	// Round DOWN to nearest 10 to bound cache size without overshooting
+	width = (width / 10) * 10
+	if width < 20 {
+		width = 20
+	}
 
 	r.mu.Lock()
 	renderer, ok := r.cache[width]

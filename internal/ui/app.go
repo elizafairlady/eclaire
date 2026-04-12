@@ -117,7 +117,7 @@ type uiFocus uint8
 const (
 	focusEditor uiFocus = iota
 	focusMain
-	focusNotification // viewing a notification's details + actions in the editor area
+	focusNotification  // viewing a notification's details + actions in the editor area
 	focusSessionPicker // selecting an existing session to resume as a tab
 )
 
@@ -136,6 +136,15 @@ type sessionIDMsg struct {
 }
 type notificationListMsg []agent.Notification
 type gatewayEventMsg gateway.Envelope
+type notifDebounceMsg struct{} // fired after debounce to check if we should auto-open
+
+// ApprovalRequestMsg is received from the gateway when a tool needs user approval.
+type ApprovalRequestMsg struct {
+	RequestID   string
+	AgentID     string
+	Action      string
+	Description string
+}
 type errorMsg struct{ Err error }
 type spinnerTickMsg struct{}
 
@@ -212,8 +221,9 @@ type App struct {
 	// Client CWD — sent with each agent run for project context
 	cwd string
 
-	// Approval flow
-	approvalCh chan ApprovalResponseMsg
+
+	// Notification auto-open debounce — don't steal focus if user is typing
+	lastKeyTime time.Time
 
 	// Pending notifications (fetched on connect, updated via events)
 	pendingNotifs      []agent.Notification
@@ -320,7 +330,6 @@ func NewApp(gw *gateway.Client, s styles.Styles, opts ...AppOptions) *App {
 		followMode:  true,
 		briefingsDir: opt.BriefingsDir,
 		reminders:   reminderStore,
-		approvalCh:  make(chan ApprovalResponseMsg, 4),
 	}
 
 	// Store CWD for agent runs. Prefer project root from connect response.
@@ -341,7 +350,6 @@ func (m *App) Init() tea.Cmd {
 		m.textarea.Focus(),
 		m.fetchAgents(),
 		m.listenEvents(),
-		m.listenApprovals(),
 		m.fetchNotifications(),
 	)
 }
@@ -359,12 +367,6 @@ func (m *App) injectBriefing() {
 	m.chatList("main").Add(chat.NewSystemMessage("briefing-"+today, string(data)))
 }
 
-func (m *App) listenApprovals() tea.Cmd {
-	return func() tea.Msg {
-		resp := <-m.approvalCh
-		return resp
-	}
-}
 
 // --- Update ---
 
@@ -418,9 +420,35 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case notificationListMsg:
-		// Store pending notifications for sidebar display.
-		// User navigates to them when ready — never forced.
 		m.pendingNotifs = []agent.Notification(msg)
+		// Schedule debounced auto-open — gives user time to finish typing
+		hasUnresolved := false
+		for _, n := range m.pendingNotifs {
+			if !n.Resolved {
+				hasUnresolved = true
+				break
+			}
+		}
+		if hasUnresolved {
+			cmds = append(cmds, tea.Tick(notifDebounce, func(time.Time) tea.Msg {
+				return notifDebounceMsg{}
+			}))
+		}
+
+	case notifDebounceMsg:
+		// Auto-open notification focus if user hasn't typed recently
+		if m.focus == focusEditor && time.Since(m.lastKeyTime) >= notifDebounce {
+			for i, n := range m.pendingNotifs {
+				if !n.Resolved {
+					m.activeNotifIdx = i
+					m.activeNotifID = n.ID
+					m.notifActionCursor = 0
+					m.focus = focusNotification
+					m.textarea.Blur()
+					break
+				}
+			}
+		}
 
 	case gatewayEventMsg:
 		cmd := m.handleGatewayEvent(gateway.Envelope(msg))
@@ -429,23 +457,9 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case ApprovalRequestMsg:
-		dlg := newApprovalDialog(msg, m.approvalCh)
-		m.dialog.OpenDialog(dlg)
-
-	case ApprovalResponseMsg:
-		// Send approval response to gateway
-		if m.gw != nil {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				m.gw.Call(ctx, gateway.MethodApprovalRespond, map[string]any{
-					"request_id": msg.RequestID,
-					"approved":   msg.Approved,
-					"persist":    msg.Persist,
-				})
-			}()
-		}
-		cmds = append(cmds, m.listenApprovals())
+		// Approval notifications are created by the gateway. Refresh to pick them up —
+		// the notificationListMsg handler will auto-open focus mode.
+		cmds = append(cmds, m.fetchNotifications())
 
 	case sessionPickerMsg:
 		// Filter to resumable sessions (not main, not archived)
@@ -471,9 +485,8 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusNotification {
 			m.focus = focusEditor
+			m.textarea.Focus()
 		}
-		tabID := m.activeTabID()
-		m.addSystemMsg(tabID, fmt.Sprintf("Notification %s: %s", msg.ID, msg.Action))
 
 	case errorMsg:
 		tabID := m.activeTabID()
@@ -576,11 +589,12 @@ func (m *App) generateLayout(w, h int) uiLayout {
 	// content + action menu + hint line.
 	if m.focus == focusNotification && m.activeNotifIdx < len(m.pendingNotifs) {
 		n := m.pendingNotifs[m.activeNotifIdx]
-		// title + content + blank + actions + hint = at least 4 + len(actions)
-		needed := 4 + len(n.Actions)
+		// title + content lines + blank + actions + hint
+		contentLines := 0
 		if n.Content != "" {
-			needed++
+			contentLines = strings.Count(n.Content, "\n") + 1
 		}
+		needed := 1 + contentLines + 1 + len(n.Actions) + 1 // title + content + blank + actions + hint
 		if needed > editorHeight {
 			editorHeight = needed
 		}
@@ -998,7 +1012,11 @@ func (m *App) drawStatus(scr uv.Screen, area uv.Rectangle) {
 
 // --- Key handling ---
 
+const notifDebounce = 2 * time.Second
+
 func (m *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	m.lastKeyTime = time.Now()
+
 	// Notification focus mode: arrow keys navigate actions, enter selects, esc cancels, ctrl+j cycles
 	if m.focus == focusNotification {
 		switch {
@@ -1539,9 +1557,9 @@ func (m *App) actOnNotification(notifID, action string) tea.Cmd {
 		}
 		_, err := m.gw.Call(ctx, gateway.MethodNotificationAct, req)
 		if err != nil {
-			return errorMsg{Err: err}
+			// Stale notification (e.g. approval for a dead session) — resolve silently
+			return notifResolvedMsg{ID: notifID, Action: action}
 		}
-		// Mark as resolved locally
 		return notifResolvedMsg{ID: notifID, Action: action}
 	}
 }
@@ -1569,8 +1587,9 @@ func (m *App) renderNotificationPrompt() string {
 	sb.WriteString(m.styles.SectionTitle.Render(fmt.Sprintf(" [%s] %s ", n.Source, n.Title)))
 	sb.WriteByte('\n')
 	if n.Content != "" {
-		sb.WriteString(" " + n.Content)
-		sb.WriteByte('\n')
+		for _, line := range strings.Split(n.Content, "\n") {
+			sb.WriteString(" " + line + "\n")
+		}
 	}
 	sb.WriteByte('\n')
 	for i, action := range n.Actions {

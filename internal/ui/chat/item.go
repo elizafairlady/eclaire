@@ -90,9 +90,15 @@ func (a *AssistantMessageItem) Render(width int) string {
 		return a.cachedRender
 	}
 
+	// Reserve 2 columns for the left indent so markdown wraps correctly
+	renderWidth := width - 2
+	if renderWidth < 20 {
+		renderWidth = 20
+	}
+
 	var rendered string
 	if a.renderFn != nil {
-		rendered = a.renderFn(a.content, width)
+		rendered = a.renderFn(a.content, renderWidth)
 	} else {
 		rendered = a.content
 	}

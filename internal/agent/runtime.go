@@ -85,7 +85,7 @@ func (rt *ConversationRuntime) RunTurn(
 ) (*TurnSummary, []fantasy.Message, error) {
 	maxIter := rt.MaxIterations
 	if maxIter <= 0 {
-		maxIter = 25
+		maxIter = HardMaxIterations
 	}
 	if maxIter > HardMaxIterations {
 		maxIter = HardMaxIterations

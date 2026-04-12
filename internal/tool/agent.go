@@ -84,8 +84,8 @@ func AgentTool(deps SubAgentDeps) Tool {
 					"agent", input.Agent,
 					"err", err,
 				)
-				result := fmt.Sprintf("[Task Completion]\nAgent: %s\nStatus: error\nTask: %s\nError: %v\n\nAction required: Report this failure to your owner and suggest alternatives or retry with different instructions.",
-					input.Agent, taskLabel, err)
+				result := fmt.Sprintf("[Task Completion]\nAgent: %s\nSession: %s\nStatus: error\nTask: %s\nError: %v\n\nAction required: Report this failure to your owner and suggest alternatives or retry with different instructions.",
+					input.Agent, sessionID, taskLabel, err)
 				return fantasy.NewTextErrorResponse(result), nil
 			}
 
@@ -101,6 +101,7 @@ func AgentTool(deps SubAgentDeps) Tool {
 			// synthesize results into a user-facing response.
 			result := fmt.Sprintf(`[Task Completion]
 Agent: %s
+Session: %s
 Status: completed
 Task: %s
 
@@ -109,7 +110,7 @@ Task: %s
 <<<END_AGENT_RESULT>>>
 
 Action required: Read the agent's result above carefully. Synthesize the findings into a clear, complete response for your owner. Present the full substance organized by topic — do not just echo a summary line. If the result is incomplete or confused, note what is missing. If you delegated to multiple agents, combine ALL results into one coherent response before replying to your owner.`,
-				input.Agent, taskLabel, content)
+				input.Agent, sessionID, taskLabel, content)
 			return fantasy.NewTextResponse(result), nil
 		},
 	)

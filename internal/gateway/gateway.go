@@ -1806,31 +1806,28 @@ func (g *Gateway) actOnApproval(n *agent.Notification, action string) (map[strin
 		return nil, fmt.Errorf("approval gate not available")
 	}
 
+	// Resolve the notification regardless of whether the approval gate still has
+	// a pending entry. The gate entry may be gone if the session died or the
+	// daemon restarted — that's fine, just clean up the stale notification.
+	resolve := func(status string, extra ...string) (map[string]string, error) {
+		g.notifications.Resolve(n.ID)
+		result := map[string]string{"status": status}
+		for i := 0; i+1 < len(extra); i += 2 {
+			result[extra[i]] = extra[i+1]
+		}
+		return result, nil
+	}
+
 	switch action {
 	case "yes":
-		err := g.approvalGate.Respond(n.RefID, agent.ApprovalResult{Approved: true})
-		if err != nil {
-			return nil, err
-		}
-		g.notifications.Resolve(n.ID)
-		return map[string]string{"status": "approved"}, nil
-
+		g.approvalGate.Respond(n.RefID, agent.ApprovalResult{Approved: true})
+		return resolve("approved")
 	case "always":
-		err := g.approvalGate.Respond(n.RefID, agent.ApprovalResult{Approved: true, Persist: true, Reason: "always"})
-		if err != nil {
-			return nil, err
-		}
-		g.notifications.Resolve(n.ID)
-		return map[string]string{"status": "approved", "persist": "always"}, nil
-
+		g.approvalGate.Respond(n.RefID, agent.ApprovalResult{Approved: true, Persist: true, Reason: "always"})
+		return resolve("approved", "persist", "always")
 	case "no":
-		err := g.approvalGate.Respond(n.RefID, agent.ApprovalResult{Approved: false})
-		if err != nil {
-			return nil, err
-		}
-		g.notifications.Resolve(n.ID)
-		return map[string]string{"status": "denied"}, nil
-
+		g.approvalGate.Respond(n.RefID, agent.ApprovalResult{Approved: false})
+		return resolve("denied")
 	default:
 		return nil, fmt.Errorf("unknown approval action %q (available: yes, always, no)", action)
 	}
