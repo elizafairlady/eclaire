@@ -257,6 +257,63 @@ func TestPermissionReadOnlyNoRateLimit(t *testing.T) {
 	}
 }
 
+func TestShellPatternApproval(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(ShellTool())
+	pc := NewPermissionChecker(reg)
+
+	// Approve "go test" pattern for coding agent
+	pc.ApprovePattern("coding", "shell", "go test")
+
+	// "go test ./..." should be approved
+	d := pc.CheckWithMode("coding", "shell", `{"command":"go test ./internal/tool/..."}`, PermissionWriteOnly)
+	if d != DecisionAllow {
+		t.Errorf("go test should be approved, got %v", d)
+	}
+
+	// "go build" should NOT be approved (different subcommand)
+	d = pc.CheckWithMode("coding", "shell", `{"command":"go build ./..."}`, PermissionWriteOnly)
+	if d != DecisionPrompt {
+		t.Errorf("go build should prompt, got %v", d)
+	}
+
+	// Now approve "go" (binary-level, covers all subcommands)
+	pc.ApprovePattern("coding", "shell", "go")
+	d = pc.CheckWithMode("coding", "shell", `{"command":"go build ./..."}`, PermissionWriteOnly)
+	if d != DecisionAllow {
+		t.Errorf("go build should be approved after go* approval, got %v", d)
+	}
+
+	// "rm -rf /" should still prompt (different binary)
+	d = pc.CheckWithMode("coding", "shell", `{"command":"rm -rf /tmp/test"}`, PermissionWriteOnly)
+	if d != DecisionPrompt {
+		t.Errorf("rm should still prompt, got %v", d)
+	}
+}
+
+func TestExtractCommandPattern(t *testing.T) {
+	tests := []struct {
+		cmd  string
+		want string
+	}{
+		{"go test ./...", "go test"},
+		{"git status", "git status"},
+		{"git log --oneline", "git log"},
+		{"ls -la /tmp", "ls"},
+		{"npm install", "npm install"},
+		{"cd /tmp && go build ./...", "go build"},
+		{"sudo rm -rf /", "rm"},
+		{"echo hello", "echo"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := ExtractCommandPattern(tt.cmd)
+		if got != tt.want {
+			t.Errorf("ExtractCommandPattern(%q) = %q, want %q", tt.cmd, got, tt.want)
+		}
+	}
+}
+
 func TestLoadApprovalsRoundTrip(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(ShellTool())

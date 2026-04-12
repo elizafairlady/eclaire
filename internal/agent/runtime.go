@@ -460,8 +460,14 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 				if inputSummary != "" {
 					desc += "\n" + inputSummary
 				}
+				// For shell tool, extract the command pattern for granular approval
+				shellPattern := ""
+				if tc.Name == "shell" {
+					shellPattern = tool.ExtractShellPattern(effectiveInput)
+				}
+
 				result, err := rt.Approver.Request(ctx, rt.AgentID, tc.Name, desc,
-					map[string]any{"tool": tc.Name, "input": effectiveInput})
+					map[string]any{"tool": tc.Name, "input": effectiveInput, "pattern": shellPattern})
 				if err != nil || !result.Approved {
 					msg := fmt.Sprintf("permission denied: tool %q was not approved", tc.Name)
 					if result.Reason != "" {
@@ -479,9 +485,15 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 						isError: true,
 					}
 				}
-				// Only persist approval for the session when user said "always"
+				// Persist approval for the session when user said "always"
 				if result.Persist {
-					rt.PermChecker.Approve(rt.AgentID, tc.Name)
+					if shellPattern != "" {
+						// Pattern-scoped: approve "go test" or "git" specifically
+						rt.PermChecker.ApprovePattern(rt.AgentID, tc.Name, shellPattern)
+					} else {
+						// Full tool approval for non-shell or unparseable commands
+						rt.PermChecker.Approve(rt.AgentID, tc.Name)
+					}
 					rt.persistApprovals()
 				}
 			} else {

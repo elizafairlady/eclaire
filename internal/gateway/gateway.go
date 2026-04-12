@@ -1697,11 +1697,18 @@ func (g *Gateway) broadcastApprovalRequests() {
 		// Create notification with RefID linking back to the approval gate's pending map.
 		// This enables `ecl notifications <id> yes` to resolve the approval.
 		if g.notifications != nil {
+			// Build context-aware action descriptions
+			alwaysDesc := fmt.Sprintf("allow ALL %s calls from %s", req.Action, req.AgentID)
+			if details, ok := req.Details.(map[string]any); ok {
+				if pattern, ok := details["pattern"].(string); ok && pattern != "" {
+					alwaysDesc = fmt.Sprintf("allow %s(%s*) from %s", req.Action, pattern, req.AgentID)
+				}
+			}
 			g.notifications.Add(agent.Notification{
 				Severity: agent.SeverityError,
 				Source:   "approval",
 				Title:    fmt.Sprintf("Approve %s:%s?", req.AgentID, req.Action),
-				Content:  fmt.Sprintf("%s\n\nyes = allow this one call\nalways = allow ALL %s calls from %s (rest of session)\nno = deny", req.Description, req.Action, req.AgentID),
+				Content:  fmt.Sprintf("%s\n\nyes = allow this one call\nalways = %s (rest of session)\nno = deny", req.Description, alwaysDesc),
 				AgentID:  req.AgentID,
 				RefID:    req.ID,
 				Actions:  agent.ActionsForSource("approval"),
