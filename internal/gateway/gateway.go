@@ -160,7 +160,16 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	// Wire shell executor: logger, command policy, audit log
 	shellLogger := logger.With("component", "shell")
 	tool.DefaultExecutor.SetLogger(shellLogger)
-	tool.DefaultExecutor.SetPolicy(tool.DefaultCommandPolicy())
+	cmdPolicy := tool.DefaultCommandPolicy()
+	// Enable sandbox if bwrap is available
+	if tool.BwrapAvailable() {
+		sandbox := tool.DefaultSandboxConfig([]string{cfg.GlobalDir()})
+		cmdPolicy.Sandbox = &sandbox
+		logger.Info("sandbox enabled", "bwrap", true, "write_roots", sandbox.WriteRoots)
+	} else {
+		logger.Warn("sandbox disabled: bwrap not found")
+	}
+	tool.DefaultExecutor.SetPolicy(cmdPolicy)
 	tool.DefaultExecutor.SetAuditLog(tool.NewAuditLog(logger.With("component", "audit")))
 
 	// Register built-in agents first
@@ -1216,6 +1225,7 @@ func (g *Gateway) handleAgentRun(c *conn, env Envelope) {
 	}
 	if projectRoot != "" {
 		wsRoots = append(wsRoots, projectRoot)
+		tool.DefaultExecutor.AddSandboxWriteRoot(projectRoot)
 	}
 
 	// .eclaire/ path — only set if .eclaire/ actually exists at the project root.

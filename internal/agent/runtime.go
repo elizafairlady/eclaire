@@ -535,10 +535,10 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 						isError: true,
 					}
 				}
-				// Approved — extend roots for rest of session
-				if result.Persist {
-					rt.extendWorkspaceRoots(effectiveInput)
-				}
+				// Approved — extend roots for rest of session + sandbox
+				rt.extendWorkspaceRoots(effectiveInput)
+				// Also extend the sandbox write roots so bwrap allows the write
+				tool.DefaultExecutor.AddSandboxWriteRoot(rt.extractWriteDir(effectiveInput))
 			} else {
 				msg := "Permission denied: " + reason
 				emit(StreamEvent{
@@ -716,21 +716,28 @@ func (rt *ConversationRuntime) persistApprovals() {
 
 // extendWorkspaceRoots adds the directory of an approved out-of-bounds write.
 func (rt *ConversationRuntime) extendWorkspaceRoots(input string) {
+	dir := rt.extractWriteDir(input)
+	if dir != "" {
+		rt.WorkspaceRoots = append(rt.WorkspaceRoots, dir)
+	}
+}
+
+// extractWriteDir returns the parent directory of the target path in a write tool's input.
+func (rt *ConversationRuntime) extractWriteDir(input string) string {
 	var params map[string]any
 	if json.Unmarshal([]byte(input), &params) != nil {
-		return
+		return ""
 	}
 	for _, key := range []string{"path", "file_path", "file"} {
 		if p, ok := params[key].(string); ok && p != "" {
 			absPath, err := filepath.Abs(p)
 			if err != nil {
-				return
+				return ""
 			}
-			dir := filepath.Dir(filepath.Clean(absPath))
-			rt.WorkspaceRoots = append(rt.WorkspaceRoots, dir)
-			return
+			return filepath.Dir(filepath.Clean(absPath))
 		}
 	}
+	return ""
 }
 
 // maxOutputTokens returns the max tokens the model can generate per step.

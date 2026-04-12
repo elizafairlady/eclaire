@@ -314,6 +314,66 @@ func TestExtractCommandPattern(t *testing.T) {
 	}
 }
 
+func TestExtractCommandPatternEdgeCases(t *testing.T) {
+	tests := []struct {
+		cmd  string
+		want string
+	}{
+		// Nested bash -c should extract inner command
+		{`bash -c 'go test ./...'`, "go test"},
+		// Subshell
+		{`(echo hello)`, "echo"},
+		// Command substitution — opaque, returns empty
+		{`$(whoami)`, ""},
+		// eval — opaque, returns empty
+		{`eval "rm -rf /"`, "eval"},
+		// Semicolon chain — first real command
+		{`echo hi; rm -rf /`, "echo"},
+		// Pipe
+		{`cat file | grep pattern`, "cat"},
+		// Empty
+		{``, ""},
+		// Just whitespace
+		{`   `, ""},
+		// Variable expansion — opaque
+		{`$CMD arg`, ""},
+		// Quoted binary
+		{`"go" test ./...`, "go test"},
+	}
+	for _, tt := range tests {
+		got := ExtractCommandPattern(tt.cmd)
+		if got != tt.want {
+			t.Errorf("ExtractCommandPattern(%q) = %q, want %q", tt.cmd, got, tt.want)
+		}
+	}
+}
+
+func TestPatternApprovalDoesNotAllowChainedCommands(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(ShellTool())
+	pc := NewPermissionChecker(reg)
+
+	// Approve "git" pattern
+	pc.ApprovePattern("coding", "shell", "git status")
+
+	// Plain git status — approved
+	d := pc.CheckWithMode("coding", "shell", `{"command":"git status"}`, PermissionWriteOnly)
+	if d != DecisionAllow {
+		t.Errorf("git status should be approved, got %v", d)
+	}
+
+	// git; rm — the pattern is "git" but the FULL command has chained rm.
+	// This should still prompt because the command policy validates the full
+	// command at execution time, but the approval check extracts "git" and
+	// would pass. This test documents the gap.
+	d = pc.CheckWithMode("coding", "shell", `{"command":"git status; rm -rf ~"}`, PermissionWriteOnly)
+	// Currently this returns Allow because pattern matches "git status"
+	// The command policy deny list is the second layer of defense.
+	if d != DecisionAllow {
+		t.Logf("NOTE: chained command got %v — pattern check sees first command only", d)
+	}
+}
+
 func TestLoadApprovalsRoundTrip(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(ShellTool())

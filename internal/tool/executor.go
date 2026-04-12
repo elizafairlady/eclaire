@@ -48,6 +48,23 @@ func (e *ShellExecutor) SetAuditLog(a *AuditLog) {
 	e.audit = a
 }
 
+// AddSandboxWriteRoot dynamically adds a write root to the sandbox config.
+// Called when a project root is detected on connection.
+func (e *ShellExecutor) AddSandboxWriteRoot(root string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.policy == nil || e.policy.Sandbox == nil {
+		return
+	}
+	// Check if already present
+	for _, r := range e.policy.Sandbox.WriteRoots {
+		if r == root {
+			return
+		}
+	}
+	e.policy.Sandbox.WriteRoots = append(e.policy.Sandbox.WriteRoots, root)
+}
+
 func (e *ShellExecutor) effectivePolicy() *CommandPolicy {
 	if e.policy != nil {
 		return e.policy
@@ -99,9 +116,16 @@ func (e *ShellExecutor) Run(ctx context.Context, command, cwd string) ExecResult
 		e.logger.Info("shell exec", "n", n, "cmd", truncateCmd(command), "cwd", cwd)
 	}
 
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
-	if cwd != "" {
-		cmd.Dir = cwd
+	var cmd *exec.Cmd
+	if policy.Sandbox != nil {
+		bin, args := buildSandboxedCommand(*policy.Sandbox, command, cwd)
+		cmd = exec.CommandContext(ctx, bin, args...)
+		// bwrap handles CWD via --chdir
+	} else {
+		cmd = exec.CommandContext(ctx, "bash", "-c", command)
+		if cwd != "" {
+			cmd.Dir = cwd
+		}
 	}
 	cmd.Env = sanitizeEnv(os.Environ())
 
@@ -175,9 +199,15 @@ func (e *ShellExecutor) StartBackground(command, cwd string) *exec.Cmd {
 	}
 	e.logAudit(command, cwd, "background", "", 0)
 
-	cmd := exec.Command("bash", "-c", command)
-	if cwd != "" {
-		cmd.Dir = cwd
+	var cmd *exec.Cmd
+	if policy.Sandbox != nil {
+		bin, args := buildSandboxedCommand(*policy.Sandbox, command, cwd)
+		cmd = exec.Command(bin, args...)
+	} else {
+		cmd = exec.Command("bash", "-c", command)
+		if cwd != "" {
+			cmd.Dir = cwd
+		}
 	}
 	cmd.Env = sanitizeEnv(os.Environ())
 	return cmd
@@ -224,6 +254,9 @@ type CommandPolicy struct {
 
 	// MaxTimeout is the maximum allowed timeout in seconds.
 	MaxTimeout int
+
+	// Sandbox restricts filesystem access via bwrap. Nil = no sandboxing.
+	Sandbox *SandboxConfig
 }
 
 // DefaultCommandPolicy returns the production command policy.

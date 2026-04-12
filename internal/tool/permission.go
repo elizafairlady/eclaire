@@ -192,55 +192,7 @@ func ExtractCommandPattern(cmd string) string {
 		return ""
 	}
 
-	// Collect all simple commands — use the last one (after cd/env preambles)
-	var lastBinary, lastSubcmd string
-	shsyntax.Walk(prog, func(node shsyntax.Node) bool {
-		call, ok := node.(*shsyntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-
-		// Find the real binary — skip preamble commands (cd, env, sudo, etc.)
-		preamble := map[string]bool{"cd": true, "env": true, "sudo": true, "nice": true, "nohup": true, "time": true}
-		startIdx := 0
-		for startIdx < len(call.Args) {
-			word := shellWordToString(call.Args[startIdx])
-			if word == "" || !preamble[filepath.Base(word)] {
-				break
-			}
-			startIdx++
-		}
-		if startIdx >= len(call.Args) {
-			return true
-		}
-
-		binary := filepath.Base(shellWordToString(call.Args[startIdx]))
-		if binary == "" {
-			return true
-		}
-
-		lastBinary = binary
-		lastSubcmd = ""
-
-		// Only extract subcommand for tools that have them.
-		// POSIX/common commands that take arguments (not subcommands)
-		// should be approved at the binary level only.
-		if startIdx+1 < len(call.Args) && hasSubcommands(binary) {
-			arg := shellWordToString(call.Args[startIdx+1])
-			if arg != "" && !strings.HasPrefix(arg, "-") {
-				lastSubcmd = arg
-			}
-		}
-		return false
-	})
-
-	if lastBinary == "" {
-		return ""
-	}
-	if lastSubcmd != "" {
-		return lastBinary + " " + lastSubcmd
-	}
-	return lastBinary
+	return extractPatternFromProg(prog)
 }
 
 // shellWordToString extracts a plain string from a shell word (literals only).
@@ -268,6 +220,101 @@ func shellWordToString(w *shsyntax.Word) string {
 		}
 	}
 	return buf.String()
+}
+
+// extractPatternFromProg walks a parsed shell program and extracts the command
+// pattern from the FIRST simple command (not last — chains like "git; rm" should
+// return "git", not "rm"). Handles bash -c, skips preambles, ignores expansions.
+func extractPatternFromProg(prog *shsyntax.File) string {
+	if prog == nil || len(prog.Stmts) == 0 {
+		return ""
+	}
+	return extractPatternFromStmt(prog.Stmts[0])
+}
+
+func extractPatternFromStmt(stmt *shsyntax.Stmt) string {
+	if stmt == nil || stmt.Cmd == nil {
+		return ""
+	}
+
+	switch cmd := stmt.Cmd.(type) {
+	case *shsyntax.CallExpr:
+		return extractPatternFromCall(cmd)
+	case *shsyntax.BinaryCmd:
+		// For chains (&&, ||, ;, |): use the first meaningful command.
+		// Skip preamble-only stmts (cd /dir && real_command).
+		if pattern := extractPatternFromStmt(cmd.X); pattern != "" {
+			return pattern
+		}
+		return extractPatternFromStmt(cmd.Y)
+	case *shsyntax.Subshell:
+		if len(cmd.Stmts) > 0 {
+			return extractPatternFromStmt(cmd.Stmts[0])
+		}
+	case *shsyntax.Block:
+		if len(cmd.Stmts) > 0 {
+			return extractPatternFromStmt(cmd.Stmts[0])
+		}
+	}
+	return ""
+}
+
+func extractPatternFromCall(call *shsyntax.CallExpr) string {
+	if len(call.Args) == 0 {
+		return ""
+	}
+
+	// Skip preamble commands. If the entire call is a preamble (cd /tmp),
+	// return empty so BinaryCmd can try the next command in the chain.
+	preambleOnly := map[string]bool{"cd": true, "env": true, "nice": true, "nohup": true, "time": true}
+	passthrough := map[string]bool{"sudo": true} // sudo passes to next arg as the real binary
+	startIdx := 0
+	for startIdx < len(call.Args) {
+		word := shellWordToString(call.Args[startIdx])
+		base := filepath.Base(word)
+		if word == "" {
+			break
+		}
+		if preambleOnly[base] {
+			return "" // cd, env, etc. with args are not meaningful patterns
+		}
+		if passthrough[base] {
+			startIdx++
+			continue
+		}
+		break
+	}
+	if startIdx >= len(call.Args) {
+		return ""
+	}
+
+	binary := shellWordToString(call.Args[startIdx])
+	if binary == "" {
+		return "" // variable expansion, command substitution, etc.
+	}
+	binary = filepath.Base(binary)
+
+	// Handle "bash -c 'actual command'" — extract pattern from the inner command
+	if (binary == "bash" || binary == "sh" || binary == "zsh") && startIdx+1 < len(call.Args) {
+		for i := startIdx + 1; i < len(call.Args); i++ {
+			arg := shellWordToString(call.Args[i])
+			if arg == "-c" && i+1 < len(call.Args) {
+				inner := shellWordToString(call.Args[i+1])
+				if inner != "" {
+					return ExtractCommandPattern(inner) // recurse on inner command
+				}
+			}
+		}
+	}
+
+	// Extract subcommand for tools that have them
+	if startIdx+1 < len(call.Args) && hasSubcommands(binary) {
+		arg := shellWordToString(call.Args[startIdx+1])
+		if arg != "" && !strings.HasPrefix(arg, "-") {
+			return binary + " " + arg
+		}
+	}
+	return binary
 }
 
 // hasSubcommands returns true for tools where the first argument is a subcommand
