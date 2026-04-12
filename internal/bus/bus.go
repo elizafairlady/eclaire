@@ -110,10 +110,18 @@ func (br *broker) publish(ev Event) {
 	defer br.mu.RUnlock()
 
 	for ch := range br.subs {
+		// Block for a short window before dropping. This prevents loss of
+		// critical events (approval requests) during brief contention spikes
+		// while still protecting against stuck subscribers.
 		select {
 		case ch <- ev:
 		default:
-			// drop if subscriber is slow
+			// Channel full — try once more with a timeout before dropping
+			select {
+			case ch <- ev:
+			case <-time.After(100 * time.Millisecond):
+				// drop — subscriber is genuinely stuck, not just briefly behind
+			}
 		}
 	}
 }
