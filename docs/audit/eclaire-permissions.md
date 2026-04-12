@@ -15,9 +15,9 @@ Audited: 2026-04-09
 - Bus-based blocking: publishes approval request, waits on channel for response
 - Pending approval tracking with cleanup
 
-### Approval Dialog (`internal/ui/approval_dialog.go`)
-- TUI dialog for showing approval prompts to user
-- Exists in code, has UI rendering
+### Approval Dialog (integrated into `internal/ui/app.go`)
+- TUI approval prompts integrated into main app model (approval_dialog.go removed)
+- Renders inline when connected, via TypeEvent broadcasts
 
 ### Bus Topics
 - `TopicApprovalRequest` and `TopicApprovalResult` defined
@@ -33,20 +33,18 @@ Audited: 2026-04-09
 ### Still Missing
 
 1. **No config option for permission mode** — Hardcoded to PermissionWriteOnly, not configurable in config.yaml
-2. **No command-pattern matching** — Currently keyed by `agentID:toolName`, not glob patterns against command strings
-3. **No "allow once" vs "allow for session" distinction** — The approved map is just a boolean
-4. **No "deny" storage** — Can approve but not persistently deny
-5. **SessionMeta.ApprovalPatterns** — Field exists but PermissionChecker doesn't read/write it
+2. ~~**No command-pattern matching**~~ — RESOLVED: `ApprovePattern()` + `ExtractCommandPattern()` with AST-based pattern extraction (binary/subcommand level)
+3. ~~**No "allow once" vs "allow for session" distinction**~~ — RESOLVED: `ApprovalResult.Persist` distinguishes once vs always-for-session
+4. ~~**No "deny" storage**~~ — RESOLVED: Deny rejects, no pattern stored (clean behavior)
+5. ~~**SessionMeta.ApprovalPatterns not wired**~~ — RESOLVED: Written on Persist=true, loaded in runner.go on session resume
 6. **Background work pre-approval** — Background jobs use PermissionWriteOnly and block on dangerous tools, but no pre-approval configurable per job
 7. **Approval dialog untested on real TTY**
 
 ## What Needs to Happen
 
 1. Add config.yaml option for permission_mode
-2. Implement command-pattern matching (not just tool names)
-3. Wire SessionMeta.ApprovalPatterns into PermissionChecker
-4. Add background work pre-approval per job or per agent
-5. Exercise the approval dialog on a real TTY
+2. Add background work pre-approval per job or per agent
+3. Exercise the approval dialog on a real TTY
 
 ## Reference
 

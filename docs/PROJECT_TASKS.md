@@ -134,10 +134,10 @@ Before building new features, fix what exists but doesn't work.
   - Audit: `docs/audit/eclaire-permissions.md`
 - [ ] Config option for permission_mode in config.yaml
 - [x] Approval dialog wired end-to-end (TUI shows prompt, user responds) — via TypeEvent broadcast
-- [ ] Session stores approved command patterns (not just tool names)
-- [ ] "Allow once" / "allow for session" / "deny" options
+- [x] Session stores approved command patterns (not just tool names) — `ApprovePattern()` + `ApprovalPatterns` in session meta
+- [x] "Allow once" / "allow for session" / "deny" options — `Persist` field in `ApprovalResult`, CLI y/a/N, TUI Y/A/N
 - [x] Background jobs use PermissionWriteOnly — create approval notifications and block
-- [ ] Persistent sessions maintain approvals across resumptions
+- [x] Persistent sessions maintain approvals across resumptions — `ApprovalPatterns` in meta.json
 
 ---
 
@@ -148,7 +148,7 @@ Before building new features, fix what exists but doesn't work.
   - Audit: `docs/audit/eclaire-notifications.md`
 - [x] Heartbeat alerts create notifications (via heartbeat job completions)
 - [ ] TUI drains notifications on connect
-- [ ] Notification panel or indicator in TUI
+- [x] Notification panel or indicator in TUI — sidebar shows unresolved count, ctrl+j opens focus mode
 - [x] `ecl notifications` CLI exists with resolution actions
 - [ ] `ecl notifications` CLI filtering by severity/source/time
 - [ ] Live test: Test 1 (reminder → notification) passes
@@ -202,7 +202,7 @@ Each specialist agent must be as capable as the standalone tool it replaces.
 - [ ] Calendar tool (CalDAV)
 - [ ] Conversation hydration tool
 - [ ] Fediverse tool
-- [ ] Memory dreaming (reference OpenClaw 3-phase system)
+- [x] Memory dreaming (3-phase: light/deep/REM via JobStore, dreaming.go)
 - [ ] MCP integration
 - [ ] LSP integration
 - [ ] Everything composable — validated by user creating new agents/tools/pipelines

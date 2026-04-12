@@ -30,6 +30,7 @@ ecl session list
 ecl job list|add|remove|run|runs
 ecl cron list|add|remove
 ecl notifications
+ecl init                          # initialize .eclaire/ in current project
 ecl flow list|run|create|status
 ecl system-prompt -a coding -m minimal
 ```
@@ -41,7 +42,7 @@ Gateway daemon on a Unix socket, NDJSON wire protocol. The TUI and CLI are clien
 ```
 ecl (TUI/CLI)  ──unix socket──>  gateway daemon
                                    ├── agent registry (5 built-in + user-defined)
-                                   ├── 26 tools (shell, files, web, email, RSS, memory, ...)
+                                   ├── 26 tools (shell, files, web, email, RSS, memory, ...) + bwrap sandbox
                                    ├── session store (JSONL, persistent main session)
                                    ├── job executor (at/every/cron scheduling)
                                    ├── notification store
@@ -95,22 +96,27 @@ Jobs persist to disk, survive restarts, and create notifications on completion. 
 
 ## Status
 
-Pre-0.1. The bones are solid — gateway, agents, tools, sessions, permissions, scheduling, notifications, TUI all exist and compile. ~34k lines of Go, ~500 tests. Not everything has been validated end-to-end on a real workload yet.
+Pre-0.1. The bones are solid — gateway, agents, tools, sessions, permissions, scheduling, notifications, TUI all exist and compile. ~40k lines of Go, ~590 tests. Not everything has been validated end-to-end on a real workload yet.
 
 What works:
 - Agent execution with streaming, tool calling, and auto-compaction
 - Permission system (PermissionWriteOnly — dangerous tools require approval)
+- Granular command-pattern shell approvals (per-binary/subcommand, not blanket)
+- Sandboxing (bwrap-based filesystem write isolation for shell commands)
 - Unified job scheduling with run logs
-- Persistent notifications with CLI resolution
+- Persistent notifications with CLI resolution and TUI sidebar
+- Flow persistence (survives restart, 30-day cleanup)
 - Memory system with three-phase dreaming (consolidation during idle time)
 - Session lifecycle with persistence and resumption
 - CWD-based project detection
+- Cost tracking in TUI status bar
+- Project directory initialization (`ecl init`)
 
 What's next:
-- Unify the legacy scheduler into the job system
-- TUI: main session tab, notification drain on connect
-- Per-connection project workspace loading
-- Live validation tests against real LLM behavior
+- Real TTY testing of the TUI
+- Live validation tests (all 4 milestone-0 acceptance tests)
+- Channel delivery implementations (Telegram, Signal)
+- Agent-scoped persistent sessions
 
 ## Design Lineage
 

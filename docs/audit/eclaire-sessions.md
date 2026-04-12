@@ -19,7 +19,7 @@ Audited: 2026-04-09
 - CreatedAt, UpdatedAt, MessageCount
 - InputTokens, OutputTokens
 - ProjectRoot (exists but never set)
-- ApprovalPatterns (exists but never used)
+- ApprovalPatterns (wired — written on Persist=true approvals, loaded on session resume)
 
 ## What Works (updated 2026-04-10)
 
