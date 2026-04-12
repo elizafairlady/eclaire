@@ -9,7 +9,6 @@ import (
 
 // Max collapsed output lines before "click to expand".
 const defaultCollapsedLines = 10
-const nestedCollapsedLines = 3
 
 // Icons by status.
 const (
@@ -29,8 +28,7 @@ var (
 	toolBodyStyle    = lipgloss.NewStyle().PaddingLeft(2)
 	truncHintStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Italic(true)
 	nestedPrefix     = "    │ "
-	agentLabelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#D4A017")).Bold(true)
-	taskTagStyle     = lipgloss.NewStyle().Background(lipgloss.Color("#333333")).Foreground(lipgloss.Color("#D4A017")).Padding(0, 1)
+	taskTagStyle = lipgloss.NewStyle().Background(lipgloss.Color("#333333")).Foreground(lipgloss.Color("#D4A017")).Padding(0, 1)
 )
 
 // ToolIcon returns the styled icon for a tool status.

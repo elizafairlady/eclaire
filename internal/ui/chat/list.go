@@ -56,6 +56,16 @@ func (l *MessageList) GetTool(toolCallID string) (ToolMessageItem, bool) {
 	return item, ok
 }
 
+// GetAssistant returns an assistant message item by ID, or nil if not found.
+func (l *MessageList) GetAssistant(id string) *AssistantMessageItem {
+	for _, item := range l.items {
+		if a, ok := item.(*AssistantMessageItem); ok && a.ID() == id {
+			return a
+		}
+	}
+	return nil
+}
+
 // GetAgent returns an agent tool item by task ID.
 func (l *MessageList) GetAgent(taskID string) (*AgentToolItem, bool) {
 	item, ok := l.agentIndex[taskID]

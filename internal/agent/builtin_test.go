@@ -7,8 +7,8 @@ import (
 
 func TestBuiltinAgents(t *testing.T) {
 	agents := BuiltinAgents()
-	if len(agents) != 5 {
-		t.Fatalf("got %d built-in agents, want 5", len(agents))
+	if len(agents) != 6 {
+		t.Fatalf("got %d built-in agents, want 6", len(agents))
 	}
 
 	ids := map[string]bool{}

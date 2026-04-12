@@ -1,6 +1,9 @@
 package tool
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -105,6 +108,152 @@ func TestWorkspaceBoundaryEnforced(t *testing.T) {
 	ok, _ = CheckWorkspaceBoundary("read", `{"path":"/etc/passwd"}`, roots)
 	if !ok {
 		t.Error("read should not be boundary-checked")
+	}
+}
+
+func TestWorkspaceBoundarySymlinkResolution(t *testing.T) {
+	// Create a temp workspace with a symlink escape
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	os.MkdirAll(workspace, 0o755)
+
+	// Create a target outside workspace
+	outside := filepath.Join(dir, "outside")
+	os.MkdirAll(outside, 0o755)
+
+	// Create a symlink inside workspace pointing outside
+	link := filepath.Join(workspace, "escape")
+	os.Symlink(outside, link)
+
+	roots := []string{workspace}
+
+	// Direct write inside workspace — allowed
+	ok, _ := CheckWorkspaceBoundary("write",
+		fmt.Sprintf(`{"path":"%s/file.go"}`, workspace), roots)
+	if !ok {
+		t.Error("direct write inside workspace should be allowed")
+	}
+
+	// Write through symlink that escapes workspace — denied
+	ok, _ = CheckWorkspaceBoundary("write",
+		fmt.Sprintf(`{"path":"%s/escape/evil.txt"}`, workspace), roots)
+	if ok {
+		t.Error("symlink escape should be denied")
+	}
+}
+
+func TestWorkspaceBoundaryShellCWD(t *testing.T) {
+	roots := []string{"/home/user/project"}
+
+	// Shell with CWD inside workspace — allowed
+	ok, _ := CheckWorkspaceBoundary("shell",
+		`{"command":"ls","cwd":"/home/user/project/src"}`, roots)
+	if !ok {
+		t.Error("shell CWD inside workspace should be allowed")
+	}
+
+	// Shell with CWD outside workspace — denied
+	ok, _ = CheckWorkspaceBoundary("shell",
+		`{"command":"ls","cwd":"/etc"}`, roots)
+	if ok {
+		t.Error("shell CWD outside workspace should be denied")
+	}
+
+	// Shell with no CWD — allowed (default)
+	ok, _ = CheckWorkspaceBoundary("shell",
+		`{"command":"ls"}`, roots)
+	if !ok {
+		t.Error("shell without CWD should be allowed")
+	}
+}
+
+func TestResolveRealPath(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a real file
+	real := filepath.Join(dir, "real")
+	os.MkdirAll(real, 0o755)
+
+	// Create a symlink
+	link := filepath.Join(dir, "link")
+	os.Symlink(real, link)
+
+	// resolveRealPath should follow the symlink
+	resolved := resolveRealPath(link)
+	if resolved != real {
+		t.Errorf("resolveRealPath(%q) = %q, want %q", link, resolved, real)
+	}
+
+	// Non-existent path under existing parent should still resolve parent
+	newFile := filepath.Join(link, "newfile.txt")
+	resolved = resolveRealPath(newFile)
+	want := filepath.Join(real, "newfile.txt")
+	if resolved != want {
+		t.Errorf("resolveRealPath(%q) = %q, want %q", newFile, resolved, want)
+	}
+}
+
+func TestPermissionToolRateLimit(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(ShellTool())
+	pc := NewPermissionChecker(reg)
+	pc.SetRateConfig(ToolRateConfig{Dangerous: 3, Modify: 5})
+
+	// Approve shell so it doesn't prompt
+	pc.Approve("test-agent", "shell")
+
+	// First 3 calls should succeed
+	for i := range 3 {
+		d := pc.CheckWithMode("test-agent", "shell", nil, PermissionWriteOnly)
+		if d != DecisionAllow {
+			t.Errorf("call %d: expected allow, got %v", i, d)
+		}
+	}
+
+	// 4th call should be rate limited (denied)
+	d := pc.CheckWithMode("test-agent", "shell", nil, PermissionWriteOnly)
+	if d != DecisionDeny {
+		t.Errorf("call 4: expected deny (rate limited), got %v", d)
+	}
+}
+
+func TestPermissionToolRateLimitPerAgent(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(ShellTool())
+	pc := NewPermissionChecker(reg)
+	pc.SetRateConfig(ToolRateConfig{Dangerous: 2, Modify: 5})
+
+	pc.Approve("agent-a", "shell")
+	pc.Approve("agent-b", "shell")
+
+	// Agent A exhausts its limit
+	for range 2 {
+		pc.CheckWithMode("agent-a", "shell", nil, PermissionWriteOnly)
+	}
+	d := pc.CheckWithMode("agent-a", "shell", nil, PermissionWriteOnly)
+	if d != DecisionDeny {
+		t.Error("agent-a should be rate limited")
+	}
+
+	// Agent B should still be allowed (separate rate bucket)
+	d = pc.CheckWithMode("agent-b", "shell", nil, PermissionWriteOnly)
+	if d != DecisionAllow {
+		t.Error("agent-b should NOT be rate limited")
+	}
+}
+
+func TestPermissionReadOnlyNoRateLimit(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(LsTool())
+	pc := NewPermissionChecker(reg)
+	pc.SetRateConfig(ToolRateConfig{Dangerous: 1, Modify: 1})
+
+	// ReadOnly tools are not rate limited
+	for range 10 {
+		d := pc.CheckWithMode("test-agent", "ls", nil, PermissionWriteOnly)
+		if d != DecisionAllow {
+			t.Error("ReadOnly tools should never be rate limited")
+		}
 	}
 }
 

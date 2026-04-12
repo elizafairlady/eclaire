@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/x/ansi"
-
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -405,17 +403,9 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamDoneMsg:
 		tabID := msg.tabID
-		if text, ok := m.streaming[tabID]; ok && text != "" {
-			cl := m.chatList(tabID)
-			cl.Add(chat.NewAssistantMessage(
-				"asst_"+fmt.Sprintf("%d", time.Now().UnixNano()),
-				text,
-				func(content string, width int) string {
-					return m.markdown.Render(content, width)
-				},
-			))
-			delete(m.streaming, tabID)
-		}
+		// The live AssistantMessageItem is already in the chatList with
+		// markdown rendering — just clean up streaming state.
+		delete(m.streaming, tabID)
 		m.busy[tabID] = false
 		delete(m.busyStatus, tabID)
 
@@ -704,38 +694,27 @@ func (m *App) drawChat(scr uv.Screen, area uv.Rectangle) {
 	cl := m.chatList(tabID)
 	cl.SetSize(chatWidth, chatHeight)
 
-	// Build streaming text with busy indicator.
-	// Spinner only shows when waiting (no tokens yet). Once text is streaming, hide it.
+	// Spinner before first token. Once text deltas arrive, the live
+	// AssistantMessageItem in the chatList renders markdown directly.
 	streamText := ""
-	if text, ok := m.streaming[tabID]; ok && text != "" {
-		streamText = m.markdown.Render(text, chatWidth-4)
-	} else if m.busy[tabID] {
-		frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
-		status := m.busyStatus[tabID]
-		if status == "" {
-			status = "thinking..."
+	if m.busy[tabID] {
+		if _, hasTokens := m.streaming[tabID]; !hasTokens {
+			frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
+			status := m.busyStatus[tabID]
+			if status == "" {
+				status = "thinking..."
+			}
+			streamText = m.styles.AgentWaiting.Render("  " + frame + " " + status)
 		}
-		streamText = m.styles.AgentWaiting.Render("  " + frame + " " + status)
 	}
 
 	content := cl.Render(streamText)
 
-	// Scroll indicator
 	if cl.ScrollOffset() > 0 {
 		content += m.styles.Muted.Render(fmt.Sprintf(" ↑ scroll offset %d ", cl.ScrollOffset()))
 	}
 
 	uv.NewStyledString(content).Draw(scr, area)
-}
-
-// wrapLine hard-wraps a single line to maxWidth characters.
-// Uses ANSI-aware wrapping that preserves escape sequences.
-func wrapLine(line string, maxWidth int) []string {
-	if maxWidth <= 0 {
-		return []string{line}
-	}
-	wrapped := ansi.Hardwrap(line, maxWidth, false)
-	return strings.Split(wrapped, "\n")
 }
 
 func (m *App) drawSidebar(scr uv.Screen, area uv.Rectangle) {
@@ -1293,6 +1272,19 @@ func (m *App) handleStreamEvent(tabID string, ev agent.StreamEvent) tea.Cmd {
 		m.streaming[tabID] += ev.Delta
 		m.busyStatus[tabID] = "responding..."
 
+		// Create or update the live assistant message in the chatList.
+		// Markdown renders during streaming — no dependency on streamDoneMsg.
+		liveID := "live_" + tabID
+		if existing := cl.GetAssistant(liveID); existing != nil {
+			existing.SetContent(m.streaming[tabID])
+		} else {
+			cl.Add(chat.NewAssistantMessage(liveID, m.streaming[tabID],
+				func(content string, width int) string {
+					return m.markdown.Render(content, width)
+				},
+			))
+		}
+
 	case agent.EventToolCall:
 		item := chat.NewToolItem(ev.ToolCallID, ev.ToolName, ev.Input)
 		cl.AddTool(ev.ToolCallID, item)
@@ -1391,12 +1383,12 @@ func (m *App) activeAgentID() string {
 }
 
 // chatList returns or creates the MessageList for an agent.
-func (m *App) chatList(agentID string) *chat.MessageList {
-	if l, ok := m.chatLists[agentID]; ok {
+func (m *App) chatList(tabID string) *chat.MessageList {
+	if l, ok := m.chatLists[tabID]; ok {
 		return l
 	}
 	l := chat.NewMessageList()
-	m.chatLists[agentID] = l
+	m.chatLists[tabID] = l
 	return l
 }
 
@@ -1515,14 +1507,6 @@ func (m *App) handleSlashCommand(text string) tea.Cmd {
 	return nil
 }
 
-func isSubAgentEvent(evType string) bool {
-	switch evType {
-	case agent.EventSubAgentStarted, agent.EventSubAgentToolCall,
-		agent.EventSubAgentToolResult, agent.EventSubAgentCompleted:
-		return true
-	}
-	return false
-}
 
 func (m *App) addActivity(icon, text string, depth int) {
 	entry := activityEntry{
@@ -1835,14 +1819,17 @@ func (m *App) handleGatewayEvent(env gateway.Envelope) tea.Cmd {
 			Description string `json:"description"`
 		}
 		if json.Unmarshal(env.Data, &eventData) == nil && eventData.EventType == "approval_request" {
-			return func() tea.Msg {
-				return ApprovalRequestMsg{
-					RequestID:   eventData.ID,
-					AgentID:     eventData.AgentID,
-					Action:      eventData.Action,
-					Description: eventData.Description,
-				}
-			}
+			return tea.Batch(
+				func() tea.Msg {
+					return ApprovalRequestMsg{
+						RequestID:   eventData.ID,
+						AgentID:     eventData.AgentID,
+						Action:      eventData.Action,
+						Description: eventData.Description,
+					}
+				},
+				m.listenEvents(),
+			)
 		}
 		m.addActivity("·", string(env.Data), 0)
 	}

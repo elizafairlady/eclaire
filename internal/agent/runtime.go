@@ -17,6 +17,14 @@ import (
 // ConversationRuntime implements the agentic loop with full control over
 // streaming, tool extraction, permission checking, hook execution, and compaction.
 // Reference: Claw Code rust/crates/runtime/src/conversation.rs — ConversationRuntime<C,T>
+// HardMaxIterations is the absolute ceiling for iterations per turn.
+// Even if MaxIterations is set higher, this value cannot be exceeded.
+const HardMaxIterations = 200
+
+// DefaultMaxSessionTokens is the default hard cap on cumulative tokens
+// (input + output) before a run is forcibly terminated. 2M tokens.
+const DefaultMaxSessionTokens int64 = 2_000_000
+
 type ConversationRuntime struct {
 	Model         fantasy.LanguageModel
 	SystemPrompt  string
@@ -28,9 +36,10 @@ type ConversationRuntime struct {
 	WorkspaceRoots []string
 	AgentID        string
 	Logger         *slog.Logger
-	MaxIterations  int   // 0 = default (25)
-	ContextWindow  int64 // total context window for the model
-	MaxOutputToks  int64 // 0 = derived from ContextWindow
+	MaxIterations    int   // 0 = default (25), clamped to HardMaxIterations
+	ContextWindow    int64 // total context window for the model
+	MaxOutputToks    int64 // 0 = derived from ContextWindow
+	MaxSessionTokens int64 // 0 = default (2M), hard cap on cumulative tokens
 }
 
 // FinishReason indicates why a conversation turn ended.
@@ -42,6 +51,7 @@ const (
 	FinishLoopDetected      FinishReason = "loop_detected"      // repeated tool calls
 	FinishDegenerateOutput  FinishReason = "degenerate_output"  // repetitive text
 	FinishConsecutiveErrors FinishReason = "consecutive_errors" // same tool failing repeatedly
+	FinishTokenBudget       FinishReason = "token_budget"       // hard session token cap exceeded
 	FinishError             FinishReason = "error"              // stream/model error
 )
 
@@ -76,6 +86,14 @@ func (rt *ConversationRuntime) RunTurn(
 	maxIter := rt.MaxIterations
 	if maxIter <= 0 {
 		maxIter = 25
+	}
+	if maxIter > HardMaxIterations {
+		maxIter = HardMaxIterations
+	}
+
+	maxSessionToks := rt.MaxSessionTokens
+	if maxSessionToks <= 0 {
+		maxSessionToks = DefaultMaxSessionTokens
 	}
 
 	// Build tool specs for the API call
@@ -197,6 +215,16 @@ func (rt *ConversationRuntime) RunTurn(
 			},
 			AgentID: rt.AgentID,
 		})
+
+		// Hard token budget check — kill the run if cumulative tokens exceed cap
+		cumulativeTokens := totalUsage.InputTokens + totalUsage.OutputTokens
+		if cumulativeTokens >= maxSessionToks {
+			rt.Logger.Warn("session token budget exceeded",
+				"cumulative", cumulativeTokens, "max", maxSessionToks)
+			finishReason = FinishTokenBudget
+			completedAllIterations = false
+			break
+		}
 
 		// Check for degenerate output BEFORE building messages or executing tools.
 		// Catches "member member member..." repetition loops.
@@ -482,6 +510,23 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 					isError: true,
 				}
 			}
+		}
+	}
+
+	// 2c. Validate tool input before execution
+	if err := tool.ValidateToolInput(tc.Name, effectiveInput); err != nil {
+		msg := fmt.Sprintf("Invalid tool input: %v", err)
+		rt.Logger.Warn("tool input validation failed", "tool", tc.Name, "err", err)
+		emit(StreamEvent{
+			Type:       EventToolResult,
+			ToolName:   tc.Name,
+			ToolCallID: tc.ID,
+			Output:     msg,
+			AgentID:    rt.AgentID,
+		})
+		return toolResult{
+			output:  fantasy.ToolResultOutputContentText{Text: msg},
+			isError: true,
 		}
 	}
 

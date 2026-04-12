@@ -149,6 +149,28 @@ func ConfigAgent() Agent {
 	}
 }
 
+// AdversaryAgent is the red team agent that stress-tests eclaire's security.
+func AdversaryAgent() Agent {
+	return &builtinAgent{
+		id:          "adversary",
+		name:        "Red Team",
+		description: "Security red team agent that stress-tests tools, permissions, and boundaries",
+		role:        RoleAdversary,
+		tools: []string{
+			"shell", "read", "write", "edit",
+			"glob", "grep", "ls", "view",
+			"fetch", "download",
+			"memory_write", "memory_read",
+			"job_output", "job_kill",
+			"todos",
+		},
+		builtin: true,
+		embeddedWorkspace: map[string]string{
+			FileSoul: adversarySoul,
+		},
+	}
+}
+
 // BuiltinAgents returns all built-in agents.
 func BuiltinAgents() []Agent {
 	return []Agent{
@@ -157,5 +179,6 @@ func BuiltinAgents() []Agent {
 		ResearchAgent(),
 		SysadminAgent(),
 		ConfigAgent(),
+		AdversaryAgent(),
 	}
 }

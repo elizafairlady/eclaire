@@ -3,6 +3,8 @@
 // compact nested children. Output is collapsed by default, expandable.
 package chat
 
+import "strings"
+
 // MessageItem is a renderable item in the chat message list.
 type MessageItem interface {
 	ID() string
@@ -59,24 +61,52 @@ func (u *UserMessageItem) Render(width int) string {
 
 // AssistantMessageItem is the assistant's text response.
 type AssistantMessageItem struct {
-	id      string
-	content string
+	id       string
+	content  string
 	renderFn func(content string, width int) string // markdown renderer
+
+	// Render cache — avoids re-running glamour every frame.
+	// Invalidated by SetContent() (streaming updates) or width change.
+	cachedRender string
+	cachedWidth  int
 }
 
 func NewAssistantMessage(id, content string, renderFn func(string, int) string) *AssistantMessageItem {
 	return &AssistantMessageItem{id: id, content: content, renderFn: renderFn}
 }
 
-func (a *AssistantMessageItem) ID() string          { return a.id }
-func (a *AssistantMessageItem) Content() string     { return a.content }
-func (a *AssistantMessageItem) SetContent(s string) { a.content = s }
+func (a *AssistantMessageItem) ID() string      { return a.id }
+func (a *AssistantMessageItem) Content() string  { return a.content }
 func (a *AssistantMessageItem) Height(width int) int { return countLines(a.Render(width)) }
+
+func (a *AssistantMessageItem) SetContent(s string) {
+	a.content = s
+	a.cachedRender = ""
+	a.cachedWidth = 0
+}
+
 func (a *AssistantMessageItem) Render(width int) string {
-	if a.renderFn != nil {
-		return a.renderFn(a.content, width)
+	if a.cachedWidth == width && a.cachedRender != "" {
+		return a.cachedRender
 	}
-	return a.content
+
+	var rendered string
+	if a.renderFn != nil {
+		rendered = a.renderFn(a.content, width)
+	} else {
+		rendered = a.content
+	}
+
+	// Per-line left padding (2 spaces) — consistent indent for assistant text
+	lines := strings.Split(rendered, "\n")
+	for i, line := range lines {
+		lines[i] = "  " + line
+	}
+	rendered = strings.Join(lines, "\n")
+
+	a.cachedRender = rendered
+	a.cachedWidth = width
+	return rendered
 }
 
 // SystemMessageItem is a system/error message.

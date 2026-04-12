@@ -157,8 +157,11 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 
 	logger.Info("tools registered", "count", len(toolReg.All()))
 
-	// Wire shell executor logger so every command is tracked
-	tool.DefaultExecutor.SetLogger(logger.With("component", "shell"))
+	// Wire shell executor: logger, command policy, audit log
+	shellLogger := logger.With("component", "shell")
+	tool.DefaultExecutor.SetLogger(shellLogger)
+	tool.DefaultExecutor.SetPolicy(tool.DefaultCommandPolicy())
+	tool.DefaultExecutor.SetAuditLog(tool.NewAuditLog(logger.With("component", "audit")))
 
 	// Register built-in agents first
 	for _, a := range agent.BuiltinAgents() {
@@ -210,6 +213,7 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	}
 
 	permChecker := tool.NewPermissionChecker(toolReg)
+	permChecker.SetAuditLogger(logger.With("component", "perm_audit"))
 	approvalGate := agent.NewApprovalGate(msgBus)
 
 	// Default workspace root to user home — users work across their whole home directory
@@ -698,6 +702,12 @@ func (g *Gateway) Start() error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", socketPath, err)
 	}
+	// Restrict socket to owner only — prevents other local users from
+	// connecting to the gateway and issuing RPC commands.
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		ln.Close()
+		return fmt.Errorf("chmod socket: %w", err)
+	}
 	g.listener = ln
 	g.startTime = time.Now()
 
@@ -1138,14 +1148,6 @@ func (g *Gateway) cleanup() error {
 	return nil
 }
 
-// broadcast sends an event to all connected clients.
-func (g *Gateway) broadcast(env Envelope) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for _, c := range g.conns {
-		c.send(env) //nolint: errcheck
-	}
-}
 
 func (g *Gateway) handleAgentRun(c *conn, env Envelope) {
 	var req AgentRunRequest
@@ -1228,6 +1230,7 @@ func (g *Gateway) handleAgentRun(c *conn, env Envelope) {
 		WorkspaceRoots: wsRoots,
 		ProjectRoot:    projectRoot,
 		ProjectDir:     projectDir,
+		Compaction:     agent.DefaultCompactionConfig(),
 	}
 
 	// If continuing an existing session, rebuild conversation history from events
@@ -1424,6 +1427,7 @@ func (g *Gateway) handleSessionContinue(c *conn, env Envelope) {
 		WorkspaceRoots: wsRoots,
 		ProjectRoot:    projectRoot,
 		ProjectDir:     projectDir,
+		Compaction:     agent.DefaultCompactionConfig(),
 	}
 
 	result, err := g.runner.Run(g.ctx, cfg, emitFn)

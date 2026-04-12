@@ -672,20 +672,4 @@ func isPersistentSession(meta *persist.SessionMeta) bool {
 	return meta.Kind == "main" || meta.Kind == "project"
 }
 
-func toolResultString(content fantasy.ToolResultOutputContent) string {
-	if content == nil {
-		return ""
-	}
-	switch c := content.(type) {
-	case fantasy.ToolResultOutputContentText:
-		return c.Text
-	case fantasy.ToolResultOutputContentError:
-		return fmt.Sprintf("Error: %v", c.Error)
-	case fantasy.ToolResultOutputContentMedia:
-		return c.Text
-	default:
-		return fmt.Sprintf("%v", content)
-	}
-}
-
 

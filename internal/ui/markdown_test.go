@@ -76,3 +76,39 @@ func TestMarkdownRendererCodeBlock(t *testing.T) {
 		t.Errorf("code block should contain function text, got %q", out)
 	}
 }
+
+// Verify the custom style doesn't pad lines to full width with colored spaces.
+// The stock "dark" theme pads every line with \033[38;5;252m \033[m sequences.
+func TestMarkdownRendererNoLinePadding(t *testing.T) {
+	r := newMarkdownRenderer()
+	out := r.Render("Short line.", 80)
+
+	// Each line should not have trailing ANSI-colored spaces
+	for i, line := range strings.Split(out, "\n") {
+		clean := stripANSI(line)
+		trimmed := strings.TrimRight(clean, " ")
+		// Allow at most a few trailing spaces (glamour may add 1-2 for formatting)
+		// but not padding to full 80-char width
+		padding := len(clean) - len(trimmed)
+		if padding > 5 {
+			t.Errorf("line %d has %d trailing spaces (full-width padding detected): %q", i, padding, line)
+		}
+	}
+}
+
+func TestMarkdownRendererCustomColors(t *testing.T) {
+	r := newMarkdownRenderer()
+	out := r.Render("# Heading\n\nSome text", 80)
+
+	// Heading should use eclaire's Secondary color (#f9e2af = RGB 249,226,175)
+	// which glamour renders as \033[38;2;249;226;175m
+	if !strings.Contains(out, "38;2;249;226;175") {
+		t.Logf("output: %q", out)
+		t.Error("heading should use eclaire's Secondary color (249,226,175)")
+	}
+
+	// Body text should use eclaire's FgBase color (#cdd6f4 = RGB 205,214,244)
+	if !strings.Contains(out, "38;2;205;214;244") {
+		t.Error("body text should use eclaire's FgBase color (205,214,244)")
+	}
+}

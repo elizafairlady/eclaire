@@ -99,9 +99,9 @@ func TestGatewayStartAndConnect(t *testing.T) {
 	if status.PID == 0 {
 		t.Error("PID should not be zero")
 	}
-	// 5 built-in + 1 test-agent from YAML in temp dir = 6
-	if status.ActiveAgents != 6 {
-		t.Errorf("ActiveAgents = %d, want 6 (5 built-in + 1 test YAML agent)", status.ActiveAgents)
+	// 6 built-in + 1 test-agent from YAML in temp dir = 7
+	if status.ActiveAgents != 7 {
+		t.Errorf("ActiveAgents = %d, want 7 (6 built-in + 1 test YAML agent)", status.ActiveAgents)
 	}
 	if status.MainSessionID == "" {
 		t.Error("MainSessionID should be set on startup")
@@ -130,9 +130,9 @@ func TestGatewayAgentList(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	// 5 built-in + 1 test-agent from YAML
-	if len(agents) != 6 {
-		t.Errorf("got %d agents, want 6 (5 built-in + 1 test YAML)", len(agents))
+	// 6 built-in + 1 test-agent from YAML
+	if len(agents) != 7 {
+		t.Errorf("got %d agents, want 7 (6 built-in + 1 test YAML)", len(agents))
 	}
 	// Verify specific built-in IDs are present
 	agentIDs := make(map[string]bool)
@@ -141,7 +141,7 @@ func TestGatewayAgentList(t *testing.T) {
 		json.Unmarshal(raw, &info)
 		agentIDs[info.ID] = true
 	}
-	for _, expected := range []string{"orchestrator", "coding", "research", "sysadmin", "config"} {
+	for _, expected := range []string{"orchestrator", "coding", "research", "sysadmin", "config", "adversary"} {
 		if !agentIDs[expected] {
 			t.Errorf("missing built-in agent %q", expected)
 		}
