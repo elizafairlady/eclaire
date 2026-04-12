@@ -2,7 +2,6 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -173,10 +172,39 @@ func TodosToolWithDeps(deps TodosDeps) Tool {
 				deps.Sessions.Append(sessionID, persist.EventTodoUpdate, persist.TodoData{Todos: persistItems})
 			}
 
-			data, _ := json.MarshalIndent(output, "", "  ")
-			return fantasy.ToolResponse{Content: string(data)}, nil
+			return fantasy.ToolResponse{Content: formatTodoOutput(output)}, nil
 		},
 	)
+}
+
+func formatTodoOutput(o TodoWriteOutput) string {
+	var sb strings.Builder
+
+	if len(o.JustCompleted) > 0 {
+		for _, c := range o.JustCompleted {
+			sb.WriteString("✓ " + c + "\n")
+		}
+	}
+	if o.JustStarted != "" {
+		sb.WriteString("● " + o.JustStarted + "\n")
+	}
+	if len(o.JustCompleted) > 0 || o.JustStarted != "" {
+		sb.WriteByte('\n')
+	}
+
+	for _, item := range o.Todos {
+		switch item.Status {
+		case "completed":
+			sb.WriteString("  [✓] " + item.Content + "\n")
+		case "in_progress":
+			sb.WriteString("  [●] " + item.Content + "\n")
+		default:
+			sb.WriteString("  [ ] " + item.Content + "\n")
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("\n%d/%d completed", o.Completed, o.Total))
+	return sb.String()
 }
 
 // HasIncompleteTodos returns true if any todo is not completed.

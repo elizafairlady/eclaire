@@ -93,6 +93,26 @@ func (p *PermissionChecker) Check(agentID, toolName string, params any) Decision
 	return p.CheckWithMode(agentID, toolName, params, PermissionAllow)
 }
 
+// LoadApprovals bulk-adds approval keys (e.g. from persisted session metadata).
+func (p *PermissionChecker) LoadApprovals(keys []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, k := range keys {
+		p.approved[k] = struct{}{}
+	}
+}
+
+// ApprovedKeys returns a copy of all currently approved keys.
+func (p *PermissionChecker) ApprovedKeys() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	keys := make([]string, 0, len(p.approved))
+	for k := range p.approved {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // CheckWithMode determines whether a tool call should proceed under the given mode.
 func (p *PermissionChecker) CheckWithMode(agentID, toolName string, params any, mode PermissionMode) Decision {
 	tier := p.registry.EffectiveTier(agentID, toolName)

@@ -244,14 +244,24 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		SystemEvents:  sysEvents,
 	}
 
-	// Create task registry and flow executor
+	// Create task registry, flow store, and flow executor
 	taskRegistry := agent.NewTaskRegistry()
+	flowStore, ferr := agent.NewFlowStore(cfg.FlowStatePath())
+	if ferr != nil {
+		logger.Warn("failed to load flow store", "err", ferr)
+	}
+	if flowStore != nil {
+		if n := flowStore.ClearStaleRunning(); n > 0 {
+			logger.Info("cleared stale flow runs", "count", n)
+		}
+	}
 	flowExecutor := &agent.FlowExecutor{
 		Runner:   runner,
 		Tasks:    taskRegistry,
 		Registry: registry,
 		Bus:      msgBus,
 		Logger:   logger,
+		Store:    flowStore,
 	}
 
 	// Register agent tool now that runner exists
@@ -1283,8 +1293,24 @@ func (g *Gateway) handleAgentStatus(c *conn, env Envelope) {
 	g.respond(c, env, data, nil)
 }
 
-func (g *Gateway) handleAgentCancel(_ *conn, _ Envelope) {
-	// TODO: wire cancel map for active runs
+func (g *Gateway) handleAgentCancel(c *conn, env Envelope) {
+	var req AgentCancelRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		g.respond(c, env, nil, &ErrorPayload{Code: 400, Message: "invalid request"})
+		return
+	}
+	if req.SessionID == "" {
+		g.respond(c, env, nil, &ErrorPayload{Code: 400, Message: "session_id is required"})
+		return
+	}
+	inst, ok := g.agents.GetInstance(req.SessionID)
+	if !ok || inst.Cancel == nil {
+		g.respond(c, env, nil, &ErrorPayload{Code: 404, Message: "no active run for session " + req.SessionID})
+		return
+	}
+	inst.Cancel()
+	g.logger.Info("agent cancelled via RPC", "session", req.SessionID, "agent", inst.AgentID)
+	g.respond(c, env, nil, nil)
 }
 
 func (g *Gateway) handleSessionCreate(c *conn, env Envelope) {
@@ -1674,8 +1700,8 @@ func (g *Gateway) broadcastApprovalRequests() {
 			g.notifications.Add(agent.Notification{
 				Severity: agent.SeverityError,
 				Source:   "approval",
-				Title:    fmt.Sprintf("Approval needed: Agent %q wants to use tool %q", req.AgentID, req.Action),
-				Content:  fmt.Sprintf("%s\n\nActions: yes (allow once), always (allow for session), no (deny)", req.Description),
+				Title:    fmt.Sprintf("Approve %s:%s?", req.AgentID, req.Action),
+				Content:  fmt.Sprintf("%s\n\nyes = allow this one call\nalways = allow ALL %s calls from %s (rest of session)\nno = deny", req.Description, req.Action, req.AgentID),
 				AgentID:  req.AgentID,
 				RefID:    req.ID,
 				Actions:  agent.ActionsForSource("approval"),
@@ -1715,7 +1741,7 @@ func (a *approvalAdapter) Request(ctx context.Context, agentID, action, descript
 	if err != nil {
 		return tool.ApprovalResult{}, err
 	}
-	return tool.ApprovalResult{Approved: result.Approved, Reason: result.Reason}, nil
+	return tool.ApprovalResult{Approved: result.Approved, Persist: result.Persist, Reason: result.Reason}, nil
 }
 
 func (g *Gateway) handleNotificationAct(req NotificationActRequest) (map[string]string, error) {

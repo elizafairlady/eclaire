@@ -123,6 +123,11 @@ func (s *Store) RunsDir() string {
 	return filepath.Join(s.globalDir, "runs")
 }
 
+// FlowStatePath returns the flow run store path.
+func (s *Store) FlowStatePath() string {
+	return filepath.Join(s.globalDir, "flows_state.json")
+}
+
 // NotificationsPath returns the notifications JSONL path.
 func (s *Store) NotificationsPath() string {
 	return filepath.Join(s.globalDir, "notifications.jsonl")

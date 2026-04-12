@@ -319,10 +319,10 @@ func TestTokenTracking(t *testing.T) {
 		t.Errorf("tokensOut = %d, want 300", app.tokensOut)
 	}
 
-	// Second step accumulates
+	// Second step — cumulative values from runtime (not additive)
 	app.handleStreamEvent("main", agent.StreamEvent{
 		Type:  agent.EventStepFinish,
-		Usage: &agent.UsageInfo{InputTokens: 2000, OutputTokens: 500},
+		Usage: &agent.UsageInfo{InputTokens: 3500, OutputTokens: 800, Cost: 0.05},
 	})
 
 	if app.tokensIn != 3500 {
@@ -330,6 +330,9 @@ func TestTokenTracking(t *testing.T) {
 	}
 	if app.tokensOut != 800 {
 		t.Errorf("tokensOut = %d, want 800", app.tokensOut)
+	}
+	if app.totalCost != 0.05 {
+		t.Errorf("totalCost = %f, want 0.05", app.totalCost)
 	}
 }
 

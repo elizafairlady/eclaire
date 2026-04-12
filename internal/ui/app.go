@@ -48,6 +48,7 @@ type keyMap struct {
 	ScrollEnd  key.Binding
 	ExpandAll  key.Binding
 	NextNotif  key.Binding
+	CancelRun  key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -64,6 +65,7 @@ func defaultKeyMap() keyMap {
 		ScrollTop:  key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
 		ScrollEnd:  key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 		ExpandAll:  key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand/collapse all")),
+		CancelRun:  key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "cancel")),
 		NextNotif:  key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "next notification")),
 	}
 }
@@ -188,6 +190,9 @@ type App struct {
 	// Streaming channel
 	streamCh chan tea.Msg
 
+	// Per-tab cancel funcs for active runs (enables ctrl+x)
+	runCancels map[string]context.CancelFunc
+
 	// Input
 	textarea textarea.Model
 
@@ -204,6 +209,7 @@ type App struct {
 	// Token tracking
 	tokensIn       int64
 	tokensOut      int64
+	totalCost      float64 // cumulative USD from provider (OpenRouter)
 	activeProvider string // "ollama", "openrouter", etc. — set from stream events
 
 	// Session todos (updated when todos tool is called)
@@ -324,6 +330,7 @@ func NewApp(gw *gateway.Client, s styles.Styles, opts ...AppOptions) *App {
 		busyStatus:  make(map[string]string),
 		activeTasks: make(map[string]*activeTask),
 		streamCh:    make(chan tea.Msg, 64),
+		runCancels:  make(map[string]context.CancelFunc),
 		textarea:    ta,
 		dialog:      dialog.NewOverlay(),
 		markdown:    newMarkdownRenderer(),
@@ -410,6 +417,7 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.streaming, tabID)
 		m.busy[tabID] = false
 		delete(m.busyStatus, tabID)
+		delete(m.runCancels, tabID)
 
 	case sessionIDMsg:
 		for i := range m.tabs {
@@ -755,16 +763,8 @@ func (m *App) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 		b.WriteString(fmt.Sprintf(" %s↓ %s↑\n",
 			m.styles.ToolName.Render(formatTokenCount(m.tokensIn)),
 			m.styles.Muted.Render(formatTokenCount(m.tokensOut))))
-		// Only show cost estimate for remote providers (OpenRouter etc.)
-		// Local models (Ollama) have no cost. The provider type comes from
-		// the active route — if not available, skip the cost line.
-		if m.activeProvider == "openrouter" {
-			costIn := float64(m.tokensIn) * 3.0 / 1_000_000
-			costOut := float64(m.tokensOut) * 15.0 / 1_000_000
-			cost := costIn + costOut
-			if cost >= 0.01 {
-				b.WriteString(fmt.Sprintf(" %s\n", m.styles.Muted.Render(fmt.Sprintf("~$%.2f", cost))))
-			}
+		if m.totalCost >= 0.01 {
+			b.WriteString(fmt.Sprintf(" %s\n", m.styles.Muted.Render(fmt.Sprintf("$%.2f", m.totalCost))))
 		}
 		b.WriteByte('\n')
 	}
@@ -983,11 +983,18 @@ func (m *App) drawStatus(scr uv.Screen, area uv.Rectangle) {
 			m.styles.HelpKey.Render("enter") + m.styles.HelpDesc.Render(" resume  ") +
 			m.styles.HelpKey.Render("esc") + m.styles.HelpDesc.Render(" cancel")
 	default:
-		left = m.styles.HelpKey.Render("enter") + m.styles.HelpDesc.Render(" send  ") +
-			m.styles.HelpKey.Render("tab") + m.styles.HelpDesc.Render(" focus  ") +
-			m.styles.HelpKey.Render("ctrl+j") + m.styles.HelpDesc.Render(" notif  ") +
-			m.styles.HelpKey.Render("ctrl+n/p") + m.styles.HelpDesc.Render(" tabs  ") +
-			m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpDesc.Render(" quit")
+		tabID := m.activeTabID()
+		if m.busy[tabID] {
+			left = m.styles.HelpKey.Render("ctrl+x") + m.styles.HelpDesc.Render(" cancel  ") +
+				m.styles.HelpKey.Render("ctrl+n/p") + m.styles.HelpDesc.Render(" tabs  ") +
+				m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpDesc.Render(" quit")
+		} else {
+			left = m.styles.HelpKey.Render("enter") + m.styles.HelpDesc.Render(" send  ") +
+				m.styles.HelpKey.Render("tab") + m.styles.HelpDesc.Render(" focus  ") +
+				m.styles.HelpKey.Render("ctrl+j") + m.styles.HelpDesc.Render(" notif  ") +
+				m.styles.HelpKey.Render("ctrl+n/p") + m.styles.HelpDesc.Render(" tabs  ") +
+				m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpDesc.Render(" quit")
+		}
 	}
 
 	right := ""
@@ -1112,6 +1119,19 @@ func (m *App) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return tea.Quit, true
+
+	case key.Matches(msg, m.keys.CancelRun):
+		tabID := m.activeTabID()
+		if cancel, ok := m.runCancels[tabID]; ok {
+			cancel()
+			// Also cancel server-side if we know the session ID
+			tab := m.tabs[m.activeTab]
+			if tab.SessionID != "" && m.gw != nil {
+				go m.gw.Call(context.Background(), gateway.MethodAgentCancel,
+					gateway.AgentCancelRequest{SessionID: tab.SessionID})
+			}
+		}
+		return nil, true
 
 	case key.Matches(msg, m.keys.NextTab):
 		m.activeTab = (m.activeTab + 1) % len(m.tabs)
@@ -1238,24 +1258,25 @@ func (m *App) sendMessage() tea.Cmd {
 	m.busy[tabID] = true
 	m.busyStatus[tabID] = "thinking..."
 
-	go m.runStream(tabID, tab, text)
+	ctx, cancel := context.WithCancel(context.Background())
+	m.runCancels[tabID] = cancel
+	go m.runStream(ctx, tabID, tab, text)
 	return tea.Batch(m.waitForStream(), spinnerTick())
 }
 
-func (m *App) runStream(tabID string, tab Tab, prompt string) {
+func (m *App) runStream(ctx context.Context, tabID string, tab Tab, prompt string) {
+	defer func() { m.streamCh <- streamDoneMsg{tabID: tabID} }()
+
 	req := gateway.AgentRunRequest{
 		AgentID:   tab.AgentID,
 		Prompt:    prompt,
 		SessionID: tab.SessionID,
 		CWD:       m.cwd,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	ch, err := m.gw.Stream(ctx, gateway.MethodAgentRun, req)
 	if err != nil {
 		m.streamCh <- errorMsg{Err: err}
-		m.streamCh <- streamDoneMsg{tabID: tabID}
 		return
 	}
 
@@ -1279,7 +1300,6 @@ func (m *App) runStream(tabID string, tab Tab, prompt string) {
 			}
 		}
 	}
-	m.streamCh <- streamDoneMsg{tabID: tabID}
 }
 
 func (m *App) handleStreamEvent(tabID string, ev agent.StreamEvent) tea.Cmd {
@@ -1328,8 +1348,11 @@ func (m *App) handleStreamEvent(tabID string, ev agent.StreamEvent) tea.Cmd {
 
 	case agent.EventStepFinish:
 		if ev.Usage != nil {
-			m.tokensIn += ev.Usage.InputTokens
-			m.tokensOut += ev.Usage.OutputTokens
+			m.tokensIn = ev.Usage.InputTokens  // cumulative from runtime
+			m.tokensOut = ev.Usage.OutputTokens
+			if ev.Usage.Cost > 0 {
+				m.totalCost = ev.Usage.Cost // cumulative from runtime
+			}
 		}
 		if ev.Provider != "" {
 			m.activeProvider = ev.Provider

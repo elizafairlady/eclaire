@@ -84,8 +84,9 @@ type StreamEvent struct {
 
 // UsageInfo tracks token consumption.
 type UsageInfo struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	Cost         float64 `json:"cost,omitempty"` // actual cost in USD from provider (OpenRouter)
 }
 
 // Stream event type constants.
@@ -173,6 +174,10 @@ type RunResult struct {
 // Run executes the agent loop using ConversationRuntime (our own agentic loop).
 // Reference: Claw Code ConversationRuntime.run_turn()
 func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) error) (*RunResult, error) {
+	// Per-run cancellable context — enables agent.cancel RPC
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
 	// Create or load session
 	var sessionID string
 	if cfg.SessionID != "" {
@@ -192,18 +197,30 @@ func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) 
 	// Register this instance in the registry for observability and lifecycle tracking.
 	// Each concurrent run of the same agent type gets its own instance keyed by session ID.
 	if r.Registry != nil {
-		r.Registry.RegisterInstance(sessionID, cfg.AgentID, nil)
+		r.Registry.RegisterInstance(sessionID, cfg.AgentID, runCancel)
 		defer r.Registry.RemoveInstance(sessionID)
+	}
+
+	// Load persisted approval patterns from session metadata on resume
+	if cfg.SessionID != "" && r.PermChecker != nil {
+		if meta, merr := r.Sessions.GetMeta(sessionID); merr == nil && len(meta.ApprovalPatterns) > 0 {
+			keys := make([]string, 0, len(meta.ApprovalPatterns))
+			for k := range meta.ApprovalPatterns {
+				keys = append(keys, k)
+			}
+			r.PermChecker.LoadApprovals(keys)
+			r.Logger.Info("loaded persisted approvals", "session", sessionID, "count", len(keys))
+		}
 	}
 
 	// Get tools for this agent (no wrappers — runtime handles hooks + permissions directly)
 	agentTools := r.Tools.ForAgent(cfg.AgentID, cfg.Agent.RequiredTools())
 
 	// Store emit, session, and project context so sub-agent tools can inherit them
-	ctx = ContextWithEmit(ctx, emit)
-	ctx = ContextWithSession(ctx, sessionID)
+	runCtx = ContextWithEmit(runCtx, emit)
+	runCtx = ContextWithSession(runCtx, sessionID)
 	if cfg.ProjectRoot != "" || cfg.ProjectDir != "" {
-		ctx = ContextWithProject(ctx, ProjectContext{Root: cfg.ProjectRoot, Dir: cfg.ProjectDir})
+		runCtx = ContextWithProject(runCtx, ProjectContext{Root: cfg.ProjectRoot, Dir: cfg.ProjectDir})
 	}
 
 	// Resolve model: try agent's role via routing table first.
@@ -220,10 +237,10 @@ func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) 
 		resolveRole = modelOverride
 	}
 
-	resolution, err := r.Router.ResolveWithContext(ctx, resolveRole)
+	resolution, err := r.Router.ResolveWithContext(runCtx, resolveRole)
 	if err != nil && modelOverride != "" && resolveRole != role {
 		// ModelOverride didn't match a route — fall back to the agent's role
-		resolution, err = r.Router.ResolveWithContext(ctx, role)
+		resolution, err = r.Router.ResolveWithContext(runCtx, role)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve model: %w", err)
@@ -266,6 +283,8 @@ func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) 
 		AgentID:        cfg.AgentID,
 		Logger:         r.Logger,
 		ContextWindow:  contextWindow,
+		SessionID:      sessionID,
+		Sessions:       r.Sessions,
 	}
 
 	// Record user message
@@ -321,7 +340,7 @@ func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) 
 	}
 
 	// Execute the turn
-	summary, _, err := rt.RunTurn(ctx, messages, persistEmit)
+	summary, _, err := rt.RunTurn(runCtx, messages, persistEmit)
 	if err != nil {
 		emit(StreamEvent{Type: EventError, Error: err.Error(), AgentID: cfg.AgentID})
 		r.Sessions.Append(sessionID, persist.EventSystemMessage, persist.MessageData{
@@ -332,6 +351,20 @@ func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) 
 			r.Sessions.UpdateStatus(sessionID, "error")
 		}
 		return nil, fmt.Errorf("agent run: %w", err)
+	}
+
+	// Handle cancellation
+	if summary.FinishReason == FinishCancelled {
+		r.Logger.Info("agent run cancelled", "session", sessionID, "agent", cfg.AgentID)
+		if meta, merr := r.Sessions.GetMeta(sessionID); merr == nil && !isPersistentSession(meta) {
+			r.Sessions.UpdateStatus(sessionID, "cancelled")
+		}
+		return &RunResult{
+			SessionID:  sessionID,
+			TotalUsage: summary.Usage,
+			Steps:      summary.Iterations,
+			Content:    summary.Text,
+		}, nil
 	}
 
 	// Persist final assistant message

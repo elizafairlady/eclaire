@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -43,7 +44,7 @@ var runCmd = &cobra.Command{
 			agentID = "orchestrator"
 		}
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
 
 		// Session continuation mode

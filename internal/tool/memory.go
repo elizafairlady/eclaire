@@ -24,7 +24,12 @@ type memoryReadInput struct {
 // MemoryWriteTool creates the memory write tool.
 // workspaceDir is ~/.eclaire/workspace/
 func MemoryWriteTool(workspaceDir string) Tool {
-	return NewTool("memory_write", "Save information to persistent memory (MEMORY.md or daily log)", TrustModify, "memory",
+	return NewTool("memory_write",
+		"Save information to persistent memory. "+
+			"type='curated' appends to MEMORY.md (long-term facts, decisions, context). "+
+			"type='daily' appends to today's daily log (transient notes, session summaries). "+
+			"Only these two types are valid.",
+		TrustModify, "memory",
 		func(ctx context.Context, input memoryWriteInput, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if input.Content == "" {
 				return fantasy.ToolResponse{Content: "Error: content is required"}, nil

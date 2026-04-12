@@ -136,6 +136,11 @@ type AgentRunRequest struct {
 	Background bool   `json:"background,omitempty"` // run without interactive approval; timeouts create notifications
 }
 
+// AgentCancelRequest is the payload for agent.cancel.
+type AgentCancelRequest struct {
+	SessionID string `json:"session_id"`
+}
+
 // StreamEvent is the typed payload within stream envelopes.
 type StreamEvent struct {
 	Type       string `json:"type"` // text_delta, tool_call, tool_result, step_finish, error

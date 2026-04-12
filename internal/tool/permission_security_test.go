@@ -257,6 +257,40 @@ func TestPermissionReadOnlyNoRateLimit(t *testing.T) {
 	}
 }
 
+func TestLoadApprovalsRoundTrip(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(ShellTool())
+	pc := NewPermissionChecker(reg)
+
+	// No approvals initially
+	if len(pc.ApprovedKeys()) != 0 {
+		t.Error("should start empty")
+	}
+
+	// Approve one tool
+	pc.Approve("agent-a", "shell")
+	keys := pc.ApprovedKeys()
+	if len(keys) != 1 || keys[0] != "agent-a:shell" {
+		t.Errorf("ApprovedKeys = %v", keys)
+	}
+
+	// Load into a fresh checker — simulates restart
+	pc2 := NewPermissionChecker(reg)
+	pc2.LoadApprovals(keys)
+
+	// Should be pre-approved
+	d := pc2.CheckWithMode("agent-a", "shell", nil, PermissionWriteOnly)
+	if d != DecisionAllow {
+		t.Errorf("loaded approval should allow, got %v", d)
+	}
+
+	// Different agent should NOT be approved
+	d = pc2.CheckWithMode("agent-b", "shell", nil, PermissionWriteOnly)
+	if d != DecisionPrompt {
+		t.Errorf("different agent should prompt, got %v", d)
+	}
+}
+
 func TestMemoryInjectionBlocked(t *testing.T) {
 	tests := []struct {
 		name    string

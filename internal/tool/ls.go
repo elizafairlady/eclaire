@@ -19,7 +19,7 @@ type lsInput struct {
 
 // LsTool creates the directory listing tool.
 func LsTool() Tool {
-	return NewTool("ls", "List directory contents in a tree structure", TrustReadOnly, "fs",
+	return NewTool("ls", "List directory contents as an indented file tree. Directories end with /.", TrustReadOnly, "fs",
 		func(ctx context.Context, input lsInput, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			root := expandPath(input.Path)
 			if root == "" {
@@ -39,57 +39,70 @@ func LsTool() Tool {
 				depth = 3
 			}
 
-			var entries []string
+			var sb strings.Builder
+			sb.WriteString(root + "/\n")
+			buildTree(&sb, root, "", depth, input.Ignore)
 
-			filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
-				if err != nil {
-					return nil
-				}
-
-				rel, _ := filepath.Rel(root, path)
-				if rel == "." {
-					return nil
-				}
-
-				// Check depth
-				parts := strings.Split(rel, string(filepath.Separator))
-				if len(parts) > depth {
-					if fi.IsDir() {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-
-				// Check ignore patterns
-				base := filepath.Base(path)
-				for _, pattern := range input.Ignore {
-					if matched, _ := filepath.Match(pattern, base); matched {
-						if fi.IsDir() {
-							return filepath.SkipDir
-						}
-						return nil
-					}
-				}
-
-				// Skip hidden dirs (like .git)
-				if fi.IsDir() && strings.HasPrefix(base, ".") && base != "." {
-					return filepath.SkipDir
-				}
-
-				indent := strings.Repeat("  ", len(parts)-1)
-				marker := "├── "
-				if fi.IsDir() {
-					entries = append(entries, fmt.Sprintf("%s%s%s/", indent, marker, base))
-				} else {
-					entries = append(entries, fmt.Sprintf("%s%s%s", indent, marker, base))
-				}
-				return nil
-			})
-
-			sort.Strings(entries)
-
-			result := root + "/\n" + strings.Join(entries, "\n")
-			return fantasy.ToolResponse{Content: result}, nil
+			return fantasy.ToolResponse{Content: sb.String()}, nil
 		},
 	)
+}
+
+// buildTree recursively renders a directory tree with proper box-drawing connectors.
+func buildTree(sb *strings.Builder, dir, prefix string, depth int, ignore []string) {
+	if depth <= 0 {
+		return
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	// Filter: skip hidden, skip ignored
+	var visible []os.DirEntry
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		skip := false
+		for _, pattern := range ignore {
+			if matched, _ := filepath.Match(pattern, name); matched {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		visible = append(visible, e)
+	}
+
+	// Sort: directories first, then files, each group alphabetical
+	sort.Slice(visible, func(i, j int) bool {
+		di, dj := visible[i].IsDir(), visible[j].IsDir()
+		if di != dj {
+			return di
+		}
+		return visible[i].Name() < visible[j].Name()
+	})
+
+	for i, e := range visible {
+		isLast := i == len(visible)-1
+		connector := "├── "
+		childPrefix := "│   "
+		if isLast {
+			connector = "╰── "
+			childPrefix = "    "
+		}
+
+		name := e.Name()
+		if e.IsDir() {
+			sb.WriteString(prefix + connector + name + "/\n")
+			buildTree(sb, filepath.Join(dir, name), prefix+childPrefix, depth-1, ignore)
+		} else {
+			sb.WriteString(prefix + connector + name + "\n")
+		}
+	}
 }

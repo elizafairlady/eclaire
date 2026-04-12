@@ -59,6 +59,7 @@ type FlowExecutor struct {
 	Registry *Registry
 	Bus      *bus.Bus
 	Logger   *slog.Logger
+	Store    *FlowStore // nil-safe; persists flow run state to disk
 }
 
 // Run executes a flow definition with the given input.
@@ -73,6 +74,7 @@ func (e *FlowExecutor) Run(ctx context.Context, def FlowDef, input string, emit 
 		CreatedAt: time.Now(),
 	}
 
+	e.saveRun(run)
 	e.Logger.Info("flow started", "flow", def.ID, "steps", len(def.Steps))
 	e.Bus.Publish(bus.TopicFlowStarted, bus.FlowEvent{
 		FlowID: flowID,
@@ -93,6 +95,7 @@ func (e *FlowExecutor) Run(ctx context.Context, def FlowDef, input string, emit 
 		if !ok {
 			run.Status = FlowFailed
 			run.Error = fmt.Sprintf("step %d (%s): agent %q not found", i, step.Name, step.Agent)
+			e.saveRun(run)
 			return run, fmt.Errorf("%s", run.Error)
 		}
 
@@ -101,6 +104,7 @@ func (e *FlowExecutor) Run(ctx context.Context, def FlowDef, input string, emit 
 		if err != nil {
 			run.Status = FlowFailed
 			run.Error = fmt.Sprintf("step %d (%s): template error: %v", i, step.Name, err)
+			e.saveRun(run)
 			return run, fmt.Errorf("%s", run.Error)
 		}
 
@@ -134,6 +138,7 @@ func (e *FlowExecutor) Run(ctx context.Context, def FlowDef, input string, emit 
 			e.Tasks.UpdateStatus(taskID, TaskFailed, "", runErr.Error())
 			run.Status = FlowFailed
 			run.Error = fmt.Sprintf("step %d (%s): %v", i, step.Name, runErr)
+			e.saveRun(run)
 			e.Bus.Publish(bus.TopicFlowCompleted, bus.FlowEvent{
 				FlowID: flowID, Name: def.Name, Status: "failed", Error: run.Error,
 			})
@@ -148,6 +153,7 @@ func (e *FlowExecutor) Run(ctx context.Context, def FlowDef, input string, emit 
 
 		run.StepOutputs = append(run.StepOutputs, output)
 		prevOutput = output
+		e.saveRun(run)
 
 		emit(StreamEvent{
 			Type:    "flow_step_completed",
@@ -157,6 +163,7 @@ func (e *FlowExecutor) Run(ctx context.Context, def FlowDef, input string, emit 
 	}
 
 	run.Status = FlowCompleted
+	e.saveRun(run)
 	e.Logger.Info("flow completed", "flow", flowID, "steps", len(def.Steps))
 	e.Bus.Publish(bus.TopicFlowCompleted, bus.FlowEvent{
 		FlowID: flowID, Name: def.Name, Status: "completed",
@@ -167,6 +174,15 @@ func (e *FlowExecutor) Run(ctx context.Context, def FlowDef, input string, emit 
 	})
 
 	return run, nil
+}
+
+func (e *FlowExecutor) saveRun(run *FlowRun) {
+	if e.Store == nil {
+		return
+	}
+	if err := e.Store.Save(run); err != nil {
+		e.Logger.Warn("failed to save flow state", "flow", run.ID, "err", err)
+	}
 }
 
 // templatePrompt applies Go template substitution to a step prompt.

@@ -9,8 +9,10 @@ import (
 	"sync/atomic"
 
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/openrouter"
 	"charm.land/fantasy/schema"
 	"github.com/elizafairlady/eclaire/internal/hook"
+	"github.com/elizafairlady/eclaire/internal/persist"
 	"github.com/elizafairlady/eclaire/internal/tool"
 )
 
@@ -40,6 +42,8 @@ type ConversationRuntime struct {
 	ContextWindow    int64 // total context window for the model
 	MaxOutputToks    int64 // 0 = derived from ContextWindow
 	MaxSessionTokens int64 // 0 = default (2M), hard cap on cumulative tokens
+	SessionID        string                 // for persisting approval patterns
+	Sessions         *persist.SessionStore  // for persisting approval patterns
 }
 
 // FinishReason indicates why a conversation turn ended.
@@ -52,6 +56,7 @@ const (
 	FinishDegenerateOutput  FinishReason = "degenerate_output"  // repetitive text
 	FinishConsecutiveErrors FinishReason = "consecutive_errors" // same tool failing repeatedly
 	FinishTokenBudget       FinishReason = "token_budget"       // hard session token cap exceeded
+	FinishCancelled         FinishReason = "cancelled"          // user cancelled the run
 	FinishError             FinishReason = "error"              // stream/model error
 )
 
@@ -106,6 +111,7 @@ func (rt *ConversationRuntime) RunTurn(
 	)
 
 	var totalUsage fantasy.Usage
+	var totalCost float64
 	var allNewMessages []fantasy.Message
 	totalToolCalls := 0
 	var finalText string
@@ -121,6 +127,13 @@ func (rt *ConversationRuntime) RunTurn(
 	for iter := range maxIter {
 		_ = iter
 
+		// Check for cancellation at the top of each iteration
+		if ctx.Err() != nil {
+			finishReason = FinishCancelled
+			completedAllIterations = false
+			break
+		}
+
 		// Build the API call
 		toolChoice := fantasy.ToolChoiceAuto
 		maxOutput := rt.maxOutputTokens()
@@ -134,6 +147,13 @@ func (rt *ConversationRuntime) RunTurn(
 		// Stream the model response
 		stream, err := rt.Model.Stream(ctx, call)
 		if err != nil {
+			if ctx.Err() != nil {
+				return &TurnSummary{
+					Text: finalText, Reasoning: finalReasoning,
+					ToolCalls: totalToolCalls, Iterations: iter,
+					Usage: totalUsage, FinishReason: FinishCancelled,
+				}, allNewMessages, nil
+			}
 			finishReason = FinishError
 			return nil, allNewMessages, fmt.Errorf("model stream: %w", err)
 		}
@@ -143,6 +163,7 @@ func (rt *ConversationRuntime) RunTurn(
 		var reasoningContent string
 		var pendingToolCalls []toolCallInfo
 		var stepUsage fantasy.Usage
+		var stepCost float64
 		var currentToolID string
 		var currentToolName string
 		var currentToolInput string
@@ -190,6 +211,8 @@ func (rt *ConversationRuntime) RunTurn(
 
 			case fantasy.StreamPartTypeFinish:
 				stepUsage = part.Usage
+				// Extract actual cost from OpenRouter provider metadata
+				stepCost += extractProviderCost(part.ProviderMetadata)
 
 			case fantasy.StreamPartTypeError:
 				if part.Error != nil {
@@ -206,12 +229,14 @@ func (rt *ConversationRuntime) RunTurn(
 		totalUsage.ReasoningTokens += stepUsage.ReasoningTokens
 		totalUsage.CacheCreationTokens += stepUsage.CacheCreationTokens
 		totalUsage.CacheReadTokens += stepUsage.CacheReadTokens
+		totalCost += stepCost
 
 		emit(StreamEvent{
 			Type: EventStepFinish,
 			Usage: &UsageInfo{
 				InputTokens:  totalUsage.InputTokens,
 				OutputTokens: totalUsage.OutputTokens,
+				Cost:         totalCost,
 			},
 			AgentID: rt.AgentID,
 		})
@@ -430,7 +455,12 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 		if decision == tool.DecisionPrompt {
 			if rt.Approver != nil {
 				desc := fmt.Sprintf("Agent %q wants to use tool %q", rt.AgentID, tc.Name)
-				result, err := rt.Approver.Request(ctx, rt.AgentID, "tool_use", desc,
+				// Include a summary of what the tool will actually do
+				inputSummary := summarizeToolInput(tc.Name, effectiveInput)
+				if inputSummary != "" {
+					desc += "\n" + inputSummary
+				}
+				result, err := rt.Approver.Request(ctx, rt.AgentID, tc.Name, desc,
 					map[string]any{"tool": tc.Name, "input": effectiveInput})
 				if err != nil || !result.Approved {
 					msg := fmt.Sprintf("permission denied: tool %q was not approved", tc.Name)
@@ -452,6 +482,7 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 				// Only persist approval for the session when user said "always"
 				if result.Persist {
 					rt.PermChecker.Approve(rt.AgentID, tc.Name)
+					rt.persistApprovals()
 				}
 			} else {
 				// No approver available — deny by default
@@ -598,6 +629,76 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 	return toolResult{
 		output:  fantasy.ToolResultOutputContentText{Text: outputText},
 		isError: false,
+	}
+}
+
+// extractProviderCost pulls the actual USD cost from provider metadata.
+// Returns 0 if no cost info is available.
+func extractProviderCost(meta fantasy.ProviderMetadata) float64 {
+	if meta == nil {
+		return 0
+	}
+	orMeta, ok := meta["openrouter"]
+	if !ok {
+		return 0
+	}
+	// Type-assert to openrouter.ProviderMetadata
+	if pm, ok := orMeta.(*openrouter.ProviderMetadata); ok {
+		return pm.Usage.Cost
+	}
+	return 0
+}
+
+// summarizeToolInput extracts the most relevant field from a tool's JSON input
+// for display in approval prompts. Returns empty string if nothing useful.
+func summarizeToolInput(toolName, input string) string {
+	var params map[string]any
+	if json.Unmarshal([]byte(input), &params) != nil {
+		return ""
+	}
+	switch toolName {
+	case "shell":
+		if cmd, ok := params["command"].(string); ok {
+			if len(cmd) > 200 {
+				cmd = cmd[:200] + "..."
+			}
+			return "Command: " + cmd
+		}
+	case "write", "edit", "multiedit", "apply_patch":
+		if p, ok := params["path"].(string); ok {
+			return "Path: " + p
+		}
+		if p, ok := params["file_path"].(string); ok {
+			return "Path: " + p
+		}
+	case "fetch":
+		if u, ok := params["url"].(string); ok {
+			return "URL: " + u
+		}
+	case "download":
+		if u, ok := params["url"].(string); ok {
+			return "URL: " + u
+		}
+	case "eclaire_email":
+		if to, ok := params["to"].(string); ok {
+			return "To: " + to
+		}
+	}
+	return ""
+}
+
+// persistApprovals saves current approval keys to session metadata (best-effort).
+func (rt *ConversationRuntime) persistApprovals() {
+	if rt.Sessions == nil || rt.SessionID == "" {
+		return
+	}
+	keys := rt.PermChecker.ApprovedKeys()
+	patterns := make(map[string][]string, len(keys))
+	for _, k := range keys {
+		patterns[k] = nil // nil = unconditional approval
+	}
+	if err := rt.Sessions.SavePatterns(rt.SessionID, patterns); err != nil {
+		rt.Logger.Warn("failed to save approval patterns", "err", err)
 	}
 }
 
