@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -16,6 +19,7 @@ import (
 )
 
 var daemonMode bool
+var noProject bool
 
 // Root is the root cobra command.
 var Root = &cobra.Command{
@@ -28,6 +32,7 @@ var Root = &cobra.Command{
 func init() {
 	Root.PersistentFlags().BoolVar(&daemonMode, "daemon", false, "run as gateway daemon (internal)")
 	Root.PersistentFlags().MarkHidden("daemon")
+	Root.Flags().BoolVar(&noProject, "no-project", false, "skip project directory detection and init prompt")
 
 	Root.AddCommand(
 		daemonCmd,
@@ -42,6 +47,7 @@ func init() {
 		briefingCmd,
 		tasksCmd,
 		notificationsCmd,
+		initCmd,
 	)
 }
 
@@ -72,8 +78,14 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	// Send CWD to gateway and get session context
 	cwd, _ := os.Getwd()
+
+	// Offer to init project directory if not home and no .eclaire/ exists
+	if !noProject {
+		maybeInitProject(cwd)
+	}
+
+	// Send CWD to gateway and get session context
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	connectResp, connectErr := client.ConnectWithCWD(ctx, cwd)
 	cancel()
@@ -95,6 +107,47 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 
 	_, err = p.Run()
 	return err
+}
+
+// maybeInitProject prompts the user to create .eclaire/ in the current directory
+// if it doesn't exist and this isn't $HOME. Only prompts on a TTY.
+func maybeInitProject(cwd string) {
+	home, _ := os.UserHomeDir()
+	if cwd == home || cwd == "/" {
+		return
+	}
+
+	eclaireDir := filepath.Join(cwd, ".eclaire")
+	if info, err := os.Stat(eclaireDir); err == nil && info.IsDir() {
+		return // already exists
+	}
+
+	// Also check if a parent has .eclaire/ (we're in a subdirectory of an existing project)
+	dir := cwd
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir || parent == home {
+			break
+		}
+		if info, err := os.Stat(filepath.Join(parent, ".eclaire")); err == nil && info.IsDir() {
+			return // parent project exists
+		}
+		dir = parent
+	}
+
+	// Prompt on TTY
+	fmt.Fprintf(os.Stderr, "No .eclaire/ found in %s\nCreate project directory? [Y/n] ", cwd)
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(strings.ToLower(line))
+
+	if line == "" || line == "y" || line == "yes" {
+		if err := initProjectDir(eclaireDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to init project: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Created %s\n", eclaireDir)
+		}
+	}
 }
 
 func runDaemon() error {
