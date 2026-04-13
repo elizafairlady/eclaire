@@ -11,6 +11,7 @@ import (
 // Config is the root configuration structure.
 type Config struct {
 	Gateway   GatewayConfig              `yaml:"gateway"`
+	Sandbox   SandboxConfig              `yaml:"sandbox"`
 	Providers map[string]ProviderConfig  `yaml:"providers"`
 	Routing   map[string][]RouteEntry    `yaml:"routing"`
 	MCP       map[string]MCPConfig       `yaml:"mcp"`
@@ -18,6 +19,16 @@ type Config struct {
 	Tools     ToolsConfig                `yaml:"tools"`
 	Agents    AgentsConfig               `yaml:"agents"`
 	Hooks     []HookConfig               `yaml:"hooks"`
+}
+
+// SandboxConfig controls bwrap-based filesystem isolation for shell commands.
+type SandboxConfig struct {
+	BwrapPath      string   `yaml:"bwrap_path,omitempty"`       // override auto-detected bwrap binary path
+	AllowNetwork   *bool    `yaml:"allow_network,omitempty"`    // allow network access (default true)
+	AllowNewPID    bool     `yaml:"allow_new_pid,omitempty"`    // new PID namespace (hides host processes)
+	ReadOnlyDirs   []string `yaml:"read_only_dirs,omitempty"`   // override default system read-only mounts (nil = use defaults)
+	ExtraReadOnly  []string `yaml:"extra_read_only,omitempty"`  // additional read-only bind mounts
+	ExtraReadWrite []string `yaml:"extra_read_write,omitempty"` // additional read-write bind mounts
 }
 
 // HookConfig defines a tool lifecycle hook.
@@ -70,7 +81,8 @@ type LSPConfig struct {
 
 // ToolsConfig holds tool permission overrides.
 type ToolsConfig struct {
-	Overrides []TierOverride `yaml:"overrides"`
+	Overrides           []TierOverride `yaml:"overrides"`
+	SubcommandBinaries  []string       `yaml:"subcommand_binaries,omitempty"` // additional binaries with subcommands (extends defaults)
 }
 
 // TierOverride changes a tool's trust tier for a specific agent.

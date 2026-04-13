@@ -36,6 +36,7 @@ type ConversationRuntime struct {
 	Approver      tool.Approver
 	PermMode      tool.PermissionMode
 	WorkspaceRoots []string
+	Executor       *tool.ShellExecutor // injectable; nil falls back to tool.DefaultExecutor
 	AgentID        string
 	Logger         *slog.Logger
 	MaxIterations    int   // 0 = default (25), clamped to HardMaxIterations
@@ -44,6 +45,14 @@ type ConversationRuntime struct {
 	MaxSessionTokens int64 // 0 = default (2M), hard cap on cumulative tokens
 	SessionID        string                 // for persisting approval patterns
 	Sessions         *persist.SessionStore  // for persisting approval patterns
+}
+
+// shellExecutor returns the configured ShellExecutor, falling back to the global default.
+func (rt *ConversationRuntime) shellExecutor() *tool.ShellExecutor {
+	if rt.Executor != nil {
+		return rt.Executor
+	}
+	return tool.DefaultExecutor
 }
 
 // FinishReason indicates why a conversation turn ended.
@@ -538,7 +547,7 @@ func (rt *ConversationRuntime) executeToolCall(ctx context.Context, tc toolCallI
 				// Approved — extend roots for rest of session + sandbox
 				rt.extendWorkspaceRoots(effectiveInput)
 				// Also extend the sandbox write roots so bwrap allows the write
-				tool.DefaultExecutor.AddSandboxWriteRoot(rt.extractWriteDir(effectiveInput))
+				rt.shellExecutor().AddSandboxWriteRoot(rt.extractWriteDir(effectiveInput))
 			} else {
 				msg := "Permission denied: " + reason
 				emit(StreamEvent{

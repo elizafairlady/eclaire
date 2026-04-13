@@ -103,11 +103,6 @@ func (s *Store) WorkspaceDir() string {
 	return filepath.Join(s.globalDir, "workspace")
 }
 
-// CronPath returns the cron.yaml path.
-func (s *Store) CronPath() string {
-	return filepath.Join(s.globalDir, "cron.yaml")
-}
-
 // HeartbeatDir returns the heartbeat data directory.
 func (s *Store) HeartbeatDir() string {
 	return filepath.Join(s.globalDir, "heartbeat")

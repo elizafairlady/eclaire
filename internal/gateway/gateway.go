@@ -111,7 +111,96 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		logger.Warn("failed to create provider router", "err", err)
 	}
 
-	// Register built-in tools
+	// Tools, shell executor, agents
+	toolReg, reminderStore := registerBuiltinTools(cfg, sessionStore, logger)
+	configureShellExecutor(cfg, logger)
+	registerAgents(registry, cfg, logger)
+
+	// Workspace, skills, context engine, hooks, permissions
+	workspaces, contextEngine, hookRunner, permChecker, approvalGate, sysEvents, workspaceRoot := buildContextSystem(cfg, registry, router, msgBus, toolReg, logger)
+
+	// Runner
+	runner := buildRunner(router, toolReg, sessionStore, msgBus, workspaces, contextEngine, registry, hookRunner, permChecker, approvalGate, cfg, sysEvents, workspaceRoot, logger)
+
+	// Task registry, flow store, flow executor
+	taskRegistry := agent.NewTaskRegistry()
+	flowStore, ferr := agent.NewFlowStore(cfg.FlowStatePath())
+	if ferr != nil {
+		logger.Warn("failed to load flow store", "err", ferr)
+	}
+	if flowStore != nil {
+		if n := flowStore.ClearStaleRunning(); n > 0 {
+			logger.Info("cleared stale flow runs", "count", n)
+		}
+	}
+	flowExecutor := &agent.FlowExecutor{
+		Runner:   runner,
+		Tasks:    taskRegistry,
+		Registry: registry,
+		Bus:      msgBus,
+		Logger:   logger,
+		Store:    flowStore,
+	}
+
+	// Register agent tool now that runner exists
+	registerRunnerDependentTools(toolReg, runner, registry, sessionStore, msgBus, logger)
+
+	// Scheduling: job store, run log, notifications, job executor, dreaming, heartbeat sync
+	jobStore, jobExec, runLog, notifStore, dreaming := initSchedulingSystem(cfg, runner, registry, msgBus, reminderStore, workspaces, logger, ctx, mainSessionID, sysEvents)
+
+	// Register briefing tool with shared cron list
+	cronList := buildCronList(jobStore)
+	toolReg.Register(tool.BriefingTool(tool.BriefingDeps{
+		Reminders:    reminderStore,
+		WorkspaceDir: cfg.WorkspaceDir(),
+		BriefingsDir: cfg.BriefingsDir(),
+		CronList:     cronList,
+	}))
+
+	// Register eclaire_manage tool
+	reloadFn := buildReloadFn(cfg, registry, jobStore, jobExec, workspaces, logger)
+	manageDeps := buildManageDeps(cfg, registry, jobStore, jobExec, runLog, notifStore, workspaces, flowExecutor, dreaming, reloadFn, cronList, logger, ctx)
+	toolReg.Register(tool.ManageTool(manageDeps))
+
+	// Channel manager — gateway is channel-agnostic.
+	// Channels are registered externally via Channels().Register() before Start().
+	channelMgr := channel.NewManager(func(_ context.Context, msg channel.InboundMessage) error {
+		logger.Info("channel message", "channel", msg.ChannelID, "agent", msg.AgentID)
+		return nil
+	}, logger)
+
+	return &Gateway{
+		config:        cfg,
+		logger:        logger,
+		agents:        registry,
+		bus:           msgBus,
+		sessions:      sessionStore,
+		mainSessionID: mainSessionID,
+		router:        router,
+		tools:         toolReg,
+		runner:        runner,
+		workspaces:    workspaces,
+		tasks:         taskRegistry,
+		flows:         flowExecutor,
+		jobStore:      jobStore,
+		jobExecutor:   jobExec,
+		runLog:        runLog,
+		notifications: notifStore,
+		reminders:     reminderStore,
+		reloadFn:      reloadFn,
+		approvalGate:  approvalGate,
+		channels:      channelMgr,
+		idleTimeout:   timeout,
+		conns:         make(map[string]*conn),
+		ctx:           ctx,
+		cancel:        cancel,
+	}, nil
+}
+
+// registerBuiltinTools creates the tool registry and registers all built-in
+// tools: file, HTTP, background job, todos, memory, reminder, and email tools.
+// Applies tool trust tier overrides from config.
+func registerBuiltinTools(cfg *config.Store, sessionStore *persist.SessionStore, logger *slog.Logger) (*tool.Registry, *tool.ReminderStore) {
 	toolReg := tool.NewRegistry()
 	// File tools
 	toolReg.Register(tool.ShellTool())
@@ -156,14 +245,35 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	}
 
 	logger.Info("tools registered", "count", len(toolReg.All()))
+	return toolReg, reminderStore
+}
 
-	// Wire shell executor: logger, command policy, audit log
+// configureShellExecutor wires the shell executor with logging, command policy,
+// subcommand binaries, sandbox config, and audit log.
+func configureShellExecutor(cfg *config.Store, logger *slog.Logger) {
 	shellLogger := logger.With("component", "shell")
 	tool.DefaultExecutor.SetLogger(shellLogger)
 	cmdPolicy := tool.DefaultCommandPolicy()
-	// Enable sandbox if bwrap is available
+	// Extend subcommand binaries from config
+	if extras := cfg.Merged().Tools.SubcommandBinaries; len(extras) > 0 {
+		tool.AddSubcommandBinaries(extras)
+	}
+	// Configure sandbox from config, apply bwrap path override if set
+	sandboxCfg := cfg.Merged().Sandbox
+	if sandboxCfg.BwrapPath != "" {
+		tool.SetBwrapPath(sandboxCfg.BwrapPath)
+	}
 	if tool.BwrapAvailable() {
 		sandbox := tool.DefaultSandboxConfig([]string{cfg.GlobalDir()})
+		if sandboxCfg.AllowNetwork != nil {
+			sandbox.AllowNetwork = *sandboxCfg.AllowNetwork
+		}
+		sandbox.AllowNewPID = sandboxCfg.AllowNewPID
+		if sandboxCfg.ReadOnlyDirs != nil {
+			sandbox.ReadOnlyDirs = sandboxCfg.ReadOnlyDirs
+		}
+		sandbox.ExtraReadOnly = append(sandbox.ExtraReadOnly, sandboxCfg.ExtraReadOnly...)
+		sandbox.ExtraReadWrite = append(sandbox.ExtraReadWrite, sandboxCfg.ExtraReadWrite...)
 		cmdPolicy.Sandbox = &sandbox
 		logger.Info("sandbox enabled", "bwrap", true, "write_roots", sandbox.WriteRoots)
 	} else {
@@ -171,7 +281,10 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	}
 	tool.DefaultExecutor.SetPolicy(cmdPolicy)
 	tool.DefaultExecutor.SetAuditLog(tool.NewAuditLog(logger.With("component", "audit")))
+}
 
+// registerAgents registers built-in agents and loads user-defined YAML agents.
+func registerAgents(registry *agent.Registry, cfg *config.Store, logger *slog.Logger) {
 	// Register built-in agents first
 	for _, a := range agent.BuiltinAgents() {
 		if rerr := registry.Register(a); rerr != nil {
@@ -193,20 +306,32 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 			logger.Info("registered user agent", "id", a.ID(), "role", a.Role())
 		}
 	}
+}
 
+// buildContextSystem creates the workspace loader, skill loader, context engine,
+// hook runner, permission checker, approval gate, system events queue, and
+// resolves the workspace root directory.
+func buildContextSystem(cfg *config.Store, registry *agent.Registry, router *provider.Router, msgBus *bus.Bus, toolReg *tool.Registry, logger *slog.Logger) (
+	workspaces *agent.WorkspaceLoader,
+	contextEngine *agent.ContextEngine,
+	hookRunner *hook.Runner,
+	permChecker *tool.PermissionChecker,
+	approvalGate *agent.ApprovalGate,
+	sysEvents *agent.SystemEventQueue,
+	workspaceRoot string,
+) {
 	// Create workspace loader and context engine
 	cwd, _ := os.Getwd()
 	projectDir := ""
 	if info, serr := os.Stat(filepath.Join(cwd, ".eclaire")); serr == nil && info.IsDir() {
 		projectDir = filepath.Join(cwd, ".eclaire")
 	}
-	workspaces := agent.NewWorkspaceLoader(cfg.WorkspaceDir(), cfg.AgentsDir(), projectDir)
+	workspaces = agent.NewWorkspaceLoader(cfg.WorkspaceDir(), cfg.AgentsDir(), projectDir)
 	skillLoader := agent.NewSkillLoader(cfg.SkillsDir(), cfg.AgentsDir(), projectDir)
-	contextEngine := agent.NewContextEngine(router, workspaces, skillLoader)
+	contextEngine = agent.NewContextEngine(router, workspaces, skillLoader)
 	contextEngine.SetRegistry(registry)
 
 	// Build hook runner from config
-	var hookRunner *hook.Runner
 	if hooks := cfg.Merged().Hooks; len(hooks) > 0 {
 		var defs []hook.Definition
 		for _, h := range hooks {
@@ -221,22 +346,27 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		logger.Info("hooks loaded", "count", len(defs))
 	}
 
-	permChecker := tool.NewPermissionChecker(toolReg)
+	permChecker = tool.NewPermissionChecker(toolReg)
 	permChecker.SetAuditLogger(logger.With("component", "perm_audit"))
-	approvalGate := agent.NewApprovalGate(msgBus)
+	approvalGate = agent.NewApprovalGate(msgBus)
 
 	// Default workspace root to user home — users work across their whole home directory
 	homeDir, _ := os.UserHomeDir()
-	workspaceRoot := homeDir
+	workspaceRoot = homeDir
 	if workspaceRoot == "" {
 		workspaceRoot = cwd
 	}
 
 	// System events queue — background work awareness for the main session.
 	// Reference: OpenClaw src/infra/system-events.ts
-	sysEvents := agent.NewSystemEventQueue()
+	sysEvents = agent.NewSystemEventQueue()
 
-	runner := &agent.Runner{
+	return
+}
+
+// buildRunner creates the agent Runner struct with all its dependencies.
+func buildRunner(router *provider.Router, toolReg *tool.Registry, sessionStore *persist.SessionStore, msgBus *bus.Bus, workspaces *agent.WorkspaceLoader, contextEngine *agent.ContextEngine, registry *agent.Registry, hookRunner *hook.Runner, permChecker *tool.PermissionChecker, approvalGate *agent.ApprovalGate, cfg *config.Store, sysEvents *agent.SystemEventQueue, workspaceRoot string, logger *slog.Logger) *agent.Runner {
+	return &agent.Runner{
 		Router:        router,
 		Tools:         toolReg,
 		Sessions:      sessionStore,
@@ -248,32 +378,16 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		HookRunner:    hookRunner,
 		PermChecker:   permChecker,
 		Approver:      &approvalAdapter{gate: approvalGate},
+		Executor:      tool.DefaultExecutor,
 		WorkspaceRoot: workspaceRoot,
 		EclaireDir:    cfg.GlobalDir(),
 		SystemEvents:  sysEvents,
 	}
+}
 
-	// Create task registry, flow store, and flow executor
-	taskRegistry := agent.NewTaskRegistry()
-	flowStore, ferr := agent.NewFlowStore(cfg.FlowStatePath())
-	if ferr != nil {
-		logger.Warn("failed to load flow store", "err", ferr)
-	}
-	if flowStore != nil {
-		if n := flowStore.ClearStaleRunning(); n > 0 {
-			logger.Info("cleared stale flow runs", "count", n)
-		}
-	}
-	flowExecutor := &agent.FlowExecutor{
-		Runner:   runner,
-		Tasks:    taskRegistry,
-		Registry: registry,
-		Bus:      msgBus,
-		Logger:   logger,
-		Store:    flowStore,
-	}
-
-	// Register agent tool now that runner exists
+// registerRunnerDependentTools registers tools that require the runner to exist:
+// agent delegation, task status, and session read tools.
+func registerRunnerDependentTools(toolReg *tool.Registry, runner *agent.Runner, registry *agent.Registry, sessionStore *persist.SessionStore, msgBus *bus.Bus, logger *slog.Logger) {
 	toolReg.Register(tool.AgentTool(tool.SubAgentDeps{
 		RunSubAgent: runner.RunSubAgent,
 		ListAgents: func() []tool.AgentInfo {
@@ -295,15 +409,27 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 	}))
 	toolReg.Register(tool.TaskStatusTool(sessionStore))
 	toolReg.Register(tool.SessionReadTool(sessionStore))
+}
 
+// initSchedulingSystem creates the unified job store, run log, notification store,
+// job executor, bus subscriptions for system event awareness, dreaming service,
+// and syncs heartbeat jobs.
+func initSchedulingSystem(cfg *config.Store, runner *agent.Runner, registry *agent.Registry, msgBus *bus.Bus, reminderStore *tool.ReminderStore, workspaces *agent.WorkspaceLoader, logger *slog.Logger, ctx context.Context, mainSessionID string, sysEvents *agent.SystemEventQueue) (
+	jobStore *agent.JobStore,
+	jobExec *agent.JobExecutor,
+	runLog *agent.RunLog,
+	notifStore *agent.NotificationStore,
+	dreaming *agent.DreamingService,
+) {
 	// Create unified job store, run log, notifications, and job executor
-	jobStore, err := agent.NewJobStore(cfg.JobsPath())
+	var err error
+	jobStore, err = agent.NewJobStore(cfg.JobsPath())
 	if err != nil {
 		logger.Warn("failed to load job store", "err", err)
 		jobStore, _ = agent.NewJobStore(filepath.Join(os.TempDir(), "eclaire-jobs.json"))
 	}
-	runLog := agent.NewRunLog(cfg.RunsDir())
-	notifStore, err := agent.NewNotificationStore(cfg.NotificationsPath())
+	runLog = agent.NewRunLog(cfg.RunsDir())
+	notifStore, err = agent.NewNotificationStore(cfg.NotificationsPath())
 	if err != nil {
 		logger.Warn("failed to load notification store", "err", err)
 	}
@@ -343,7 +469,7 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		sysEvents.Enqueue(se.ParentSessionID, text, "subagent", "subagent:"+se.TaskID)
 	})
 
-	jobExec := agent.NewJobExecutor(jobStore, runLog, notifStore, runner, registry, msgBus, logger)
+	jobExec = agent.NewJobExecutor(jobStore, runLog, notifStore, runner, registry, msgBus, logger)
 	jobExec.SetMainSession(mainSessionID, sysEvents)
 
 	// Wire reminder firing into job executor's tick loop
@@ -351,14 +477,9 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 
 	// Create dreaming service (memory consolidation).
 	// Reference: OpenClaw src/memory-host-sdk/dreaming.ts
-	dreaming := agent.NewDreamingService(jobStore, jobExec, logger)
+	dreaming = agent.NewDreamingService(jobStore, jobExec, logger)
 	if err := dreaming.EnsureJobs(); err != nil {
 		logger.Warn("failed to ensure dreaming jobs", "err", err)
-	}
-
-	// Migrate legacy cron.yaml entries to unified job store
-	if migrated := jobExec.MigrateLegacyCron(cfg.CronPath()); migrated > 0 {
-		logger.Info("migrated legacy cron entries", "count", migrated)
 	}
 
 	// Sync HEARTBEAT.md tasks to job store
@@ -366,34 +487,37 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		logger.Warn("failed to sync heartbeat jobs", "err", err)
 	}
 
-	// Register briefing tool — CronList pulls from unified job store
-	toolReg.Register(tool.BriefingTool(tool.BriefingDeps{
-		Reminders:    reminderStore,
-		WorkspaceDir: cfg.WorkspaceDir(),
-		BriefingsDir: cfg.BriefingsDir(),
-		CronList: func() []tool.CronEntry {
-			var out []tool.CronEntry
-			for _, j := range jobStore.List() {
-				if !j.Enabled {
-					continue
-				}
-				schedule := ""
-				switch j.Schedule.Kind {
-				case agent.ScheduleCron:
-					schedule = j.Schedule.Expr
-				case agent.ScheduleEvery:
-					schedule = "every " + j.Schedule.Every
-				case agent.ScheduleAt:
-					schedule = "at " + j.Schedule.At
-				}
-				out = append(out, tool.CronEntry{ID: j.ID, Schedule: schedule, AgentID: j.AgentID, Prompt: j.Prompt, Enabled: j.Enabled})
-			}
-			return out
-		},
-	}))
+	return
+}
 
-	// Register eclaire_manage tool — reload closure captures registry
-	reloadFn := func() tool.ReloadResult {
+// buildCronList returns a closure that lists enabled jobs as CronEntry values.
+// Shared between the briefing tool and the manage tool to avoid duplication.
+func buildCronList(jobStore *agent.JobStore) func() []tool.CronEntry {
+	return func() []tool.CronEntry {
+		var out []tool.CronEntry
+		for _, j := range jobStore.List() {
+			if !j.Enabled {
+				continue
+			}
+			schedule := ""
+			switch j.Schedule.Kind {
+			case agent.ScheduleCron:
+				schedule = j.Schedule.Expr
+			case agent.ScheduleEvery:
+				schedule = "every " + j.Schedule.Every
+			case agent.ScheduleAt:
+				schedule = "at " + j.Schedule.At
+			}
+			out = append(out, tool.CronEntry{ID: j.ID, Schedule: schedule, AgentID: j.AgentID, Prompt: j.Prompt, Enabled: j.Enabled})
+		}
+		return out
+	}
+}
+
+// buildReloadFn creates the reload closure that reloads agents from disk and
+// re-syncs heartbeat jobs. Captured by the gateway's reloadFn field.
+func buildReloadFn(cfg *config.Store, registry *agent.Registry, jobStore *agent.JobStore, jobExec *agent.JobExecutor, workspaces *agent.WorkspaceLoader, logger *slog.Logger) func() tool.ReloadResult {
+	return func() tool.ReloadResult {
 		result := tool.ReloadResult{}
 		agents, err := agent.LoadAgentsDir(cfg.AgentsDir())
 		if err != nil {
@@ -411,41 +535,26 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 		if syncErr := jobExec.SyncHeartbeatJobs(workspaces); syncErr != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("sync heartbeat: %v", syncErr))
 		}
-		result.CronEntries = jobStore.Count()
-		logger.Info("reload complete", "agents", result.AgentsLoaded, "jobs", result.CronEntries)
+		result.JobCount = jobStore.Count()
+		logger.Info("reload complete", "agents", result.AgentsLoaded, "jobs", result.JobCount)
 		return result
 	}
+}
+
+// buildManageDeps assembles the ManageDeps struct for the eclaire_manage tool.
+func buildManageDeps(cfg *config.Store, registry *agent.Registry, jobStore *agent.JobStore, jobExec *agent.JobExecutor, runLog *agent.RunLog, notifStore *agent.NotificationStore, workspaces *agent.WorkspaceLoader, flowExecutor *agent.FlowExecutor, dreaming *agent.DreamingService, reloadFn func() tool.ReloadResult, cronList func() []tool.CronEntry, logger *slog.Logger, ctx context.Context) tool.ManageDeps {
 	// Active flow runs tracked in memory for status queries
 	flowRuns := struct {
 		sync.RWMutex
 		runs map[string]*tool.FlowRunInfo
 	}{runs: make(map[string]*tool.FlowRunInfo)}
 
-	toolReg.Register(tool.ManageTool(tool.ManageDeps{
+	return tool.ManageDeps{
 		AgentsDir: cfg.AgentsDir(),
 		SkillsDir: cfg.SkillsDir(),
 		FlowsDir:  cfg.FlowsDir(),
-		CronPath:  cfg.CronPath(),
 		Reload:    reloadFn,
-		CronList: func() []tool.CronEntry {
-			var out []tool.CronEntry
-			for _, j := range jobStore.List() {
-				if !j.Enabled {
-					continue
-				}
-				schedule := ""
-				switch j.Schedule.Kind {
-				case agent.ScheduleCron:
-					schedule = j.Schedule.Expr
-				case agent.ScheduleEvery:
-					schedule = "every " + j.Schedule.Every
-				case agent.ScheduleAt:
-					schedule = "at " + j.Schedule.At
-				}
-				out = append(out, tool.CronEntry{ID: j.ID, Schedule: schedule, AgentID: j.AgentID, Prompt: j.Prompt, Enabled: j.Enabled})
-			}
-			return out
-		},
+		CronList:  cronList,
 		AgentList: func() []tool.AgentInfo {
 			agents := registry.All()
 			out := make([]tool.AgentInfo, len(agents))
@@ -641,41 +750,7 @@ func New(cfg *config.Store, logger *slog.Logger) (*Gateway, error) {
 			return dreaming.TriggerPhase(ctx, agent.DreamPhase(phase))
 		},
 		Logger: logger,
-	}))
-
-	// Channel manager — gateway is channel-agnostic.
-	// Channels are registered externally via Channels().Register() before Start().
-	channelMgr := channel.NewManager(func(_ context.Context, msg channel.InboundMessage) error {
-		logger.Info("channel message", "channel", msg.ChannelID, "agent", msg.AgentID)
-		return nil
-	}, logger)
-
-	return &Gateway{
-		config:        cfg,
-		logger:        logger,
-		agents:        registry,
-		bus:           msgBus,
-		sessions:      sessionStore,
-		mainSessionID: mainSessionID,
-		router:        router,
-		tools:         toolReg,
-		runner:        runner,
-		workspaces:    workspaces,
-		tasks:         taskRegistry,
-		flows:         flowExecutor,
-		jobStore:      jobStore,
-		jobExecutor:   jobExec,
-		runLog:        runLog,
-		notifications: notifStore,
-		reminders:    reminderStore,
-		reloadFn:      reloadFn,
-		approvalGate:  approvalGate,
-		channels:      channelMgr,
-		idleTimeout:   timeout,
-		conns:         make(map[string]*conn),
-		ctx:           ctx,
-		cancel:        cancel,
-	}, nil
+	}
 }
 
 // jobToInfo converts an agent.Job to a tool.JobInfo for display.
@@ -1225,7 +1300,7 @@ func (g *Gateway) handleAgentRun(c *conn, env Envelope) {
 	}
 	if projectRoot != "" {
 		wsRoots = append(wsRoots, projectRoot)
-		tool.DefaultExecutor.AddSandboxWriteRoot(projectRoot)
+		g.runner.Executor.AddSandboxWriteRoot(projectRoot)
 	}
 
 	// .eclaire/ path — only set if .eclaire/ actually exists at the project root.

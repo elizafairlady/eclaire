@@ -90,11 +90,6 @@ func (p *PermissionChecker) SetAuditLogger(l *slog.Logger) {
 	p.mu.Unlock()
 }
 
-// Check determines whether a tool call should proceed (legacy, uses PermissionAllow).
-func (p *PermissionChecker) Check(agentID, toolName string, params any) Decision {
-	return p.CheckWithMode(agentID, toolName, params, PermissionAllow)
-}
-
 // LoadApprovals bulk-adds approval keys (e.g. from persisted session metadata).
 func (p *PermissionChecker) LoadApprovals(keys []string) {
 	p.mu.Lock()
@@ -317,26 +312,36 @@ func extractPatternFromCall(call *shsyntax.CallExpr) string {
 	return binary
 }
 
-// hasSubcommands returns true for tools where the first argument is a subcommand
-// (go build, git status, docker run) vs tools where it's just an argument
-// (echo hello, cat file.txt, grep pattern).
-func hasSubcommands(binary string) bool {
-	switch binary {
-	case "go", "git", "docker", "podman", "kubectl", "helm",
-		"npm", "npx", "yarn", "pnpm", "bun", "deno",
-		"cargo", "rustup", "mix", "elixir",
-		"pip", "pip3", "poetry", "uv", "conda",
-		"apt", "apt-get", "dnf", "yum", "pacman", "emerge", "xbps-install",
-		"brew", "port", "snap", "flatpak", "nix",
-		"systemctl", "journalctl", "rc-service", "rc-update",
-		"openrc", "sv",
-		"ip", "ss", "tc", "nmcli", "networkctl",
-		"gh", "glab",
-		"ecl",
-		"make":
-		return true
+// subcommandBinaries is the set of binaries where the first non-flag argument
+// is a subcommand (go build, git status, docker run) vs tools where it's just
+// an argument (echo hello, cat file.txt, grep pattern).
+// Use AddSubcommandBinaries to extend this set from config.
+var subcommandBinaries = map[string]struct{}{
+	"go": {}, "git": {}, "docker": {}, "podman": {}, "kubectl": {}, "helm": {},
+	"npm": {}, "npx": {}, "yarn": {}, "pnpm": {}, "bun": {}, "deno": {},
+	"cargo": {}, "rustup": {}, "mix": {}, "elixir": {},
+	"pip": {}, "pip3": {}, "poetry": {}, "uv": {}, "conda": {},
+	"apt": {}, "apt-get": {}, "dnf": {}, "yum": {}, "pacman": {}, "emerge": {}, "xbps-install": {},
+	"brew": {}, "port": {}, "snap": {}, "flatpak": {}, "nix": {},
+	"systemctl": {}, "journalctl": {}, "rc-service": {}, "rc-update": {},
+	"openrc": {}, "sv": {},
+	"ip": {}, "ss": {}, "tc": {}, "nmcli": {}, "networkctl": {},
+	"gh": {}, "glab": {},
+	"ecl": {},
+	"make": {},
+}
+
+// AddSubcommandBinaries adds additional binaries to the subcommand set.
+// Call at startup from config before any permission checks.
+func AddSubcommandBinaries(binaries []string) {
+	for _, b := range binaries {
+		subcommandBinaries[b] = struct{}{}
 	}
-	return false
+}
+
+func hasSubcommands(binary string) bool {
+	_, ok := subcommandBinaries[binary]
+	return ok
 }
 
 // CheckWithMode determines whether a tool call should proceed under the given mode.

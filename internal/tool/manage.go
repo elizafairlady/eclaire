@@ -18,22 +18,17 @@ import (
 type ReloadResult struct {
 	AgentsLoaded   int      `json:"agents_loaded"`
 	AgentsReplaced int      `json:"agents_replaced"`
-	CronEntries    int      `json:"cron_entries"`
+	JobCount       int      `json:"job_count"`
 	Errors         []string `json:"errors,omitempty"`
 }
 
-// CronEntry mirrors agent.CronEntry to avoid import cycle.
+// CronEntry is a unified job entry exposed through the cron_list operation.
 type CronEntry struct {
-	ID       string `json:"id" yaml:"id"`
-	Schedule string `json:"schedule" yaml:"schedule"`
-	AgentID  string `json:"agent_id" yaml:"agent_id"`
-	Prompt   string `json:"prompt" yaml:"prompt"`
-	Enabled  bool   `json:"enabled" yaml:"enabled"`
-}
-
-// CronConfig is the top-level cron.yaml structure.
-type CronConfig struct {
-	Entries []CronEntry `yaml:"entries"`
+	ID       string `json:"id"`
+	Schedule string `json:"schedule"`
+	AgentID  string `json:"agent_id"`
+	Prompt   string `json:"prompt"`
+	Enabled  bool   `json:"enabled"`
 }
 
 // AgentInfo is a snapshot of agent state for display.
@@ -109,11 +104,10 @@ type JobRunLogEntry struct {
 }
 
 type ManageDeps struct {
-	AgentsDir     string
-	SkillsDir     string
-	FlowsDir      string
-	CronPath      string
-	WorkspaceDir  string
+	AgentsDir    string
+	SkillsDir    string
+	FlowsDir     string
+	WorkspaceDir string
 	Reload        func() ReloadResult
 	CronList      func() []CronEntry
 	AgentList     func() []AgentInfo
@@ -400,45 +394,18 @@ func handleCronAdd(deps ManageDeps, input manageInput) (fantasy.ToolResponse, er
 	if len(strings.Fields(input.CronSchedule)) != 5 {
 		return fantasy.NewTextErrorResponse("cron_schedule must be a 5-field cron expression (minute hour day month weekday)"), nil
 	}
-
-	entries := readCronFile(deps.CronPath)
-
-	// Upsert by ID
-	found := false
-	for i, e := range entries {
-		if e.ID == input.CronID {
-			entries[i] = CronEntry{
-				ID:      input.CronID,
-				Schedule: input.CronSchedule,
-				AgentID: input.CronAgent,
-				Prompt:  input.CronPrompt,
-				Enabled: true,
-			}
-			found = true
-			break
-		}
-	}
-	if !found {
-		entries = append(entries, CronEntry{
-			ID:       input.CronID,
-			Schedule: input.CronSchedule,
-			AgentID:  input.CronAgent,
-			Prompt:   input.CronPrompt,
-			Enabled:  true,
-		})
+	if deps.JobAdd == nil {
+		return fantasy.NewTextErrorResponse("job scheduling not available"), nil
 	}
 
-	if err := writeCronFile(deps.CronPath, entries); err != nil {
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("write cron.yaml: %v", err)), nil
-	}
-
-	result := deps.Reload()
-	action := "Added"
-	if found {
-		action = "Updated"
+	// Delegate to unified job store with kind=cron
+	info, err := deps.JobAdd("cron: "+input.CronID, "cron", input.CronSchedule,
+		input.CronAgent, input.CronPrompt, "isolated", nil, "")
+	if err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("cron_add failed: %v", err)), nil
 	}
 	return fantasy.ToolResponse{
-		Content: fmt.Sprintf("%s cron entry %q. Schedule: %s. %d total entries.", action, input.CronID, input.CronSchedule, result.CronEntries),
+		Content: fmt.Sprintf("Added cron entry %q (job %s). Schedule: %s.", input.CronID, info.ID, input.CronSchedule),
 	}, nil
 }
 
@@ -446,30 +413,20 @@ func handleCronRemove(deps ManageDeps, input manageInput) (fantasy.ToolResponse,
 	if input.CronID == "" {
 		return fantasy.NewTextErrorResponse("cron_id is required"), nil
 	}
+	if deps.JobRemove == nil {
+		return fantasy.NewTextErrorResponse("job scheduling not available"), nil
+	}
 
-	entries := readCronFile(deps.CronPath)
-
-	var kept []CronEntry
-	found := false
-	for _, e := range entries {
-		if e.ID == input.CronID {
-			found = true
-			continue
+	// Try with "cron-" prefix first, then bare ID
+	id := "cron-" + input.CronID
+	if err := deps.JobRemove(id); err != nil {
+		// Try bare ID
+		if err2 := deps.JobRemove(input.CronID); err2 != nil {
+			return fantasy.ToolResponse{Content: fmt.Sprintf("Cron entry %q not found.", input.CronID)}, nil
 		}
-		kept = append(kept, e)
 	}
-
-	if !found {
-		return fantasy.ToolResponse{Content: fmt.Sprintf("Cron entry %q not found.", input.CronID)}, nil
-	}
-
-	if err := writeCronFile(deps.CronPath, kept); err != nil {
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("write cron.yaml: %v", err)), nil
-	}
-
-	result := deps.Reload()
 	return fantasy.ToolResponse{
-		Content: fmt.Sprintf("Removed cron entry %q. %d entries remaining.", input.CronID, result.CronEntries),
+		Content: fmt.Sprintf("Removed cron entry %q.", input.CronID),
 	}, nil
 }
 
@@ -609,34 +566,6 @@ func handleFlowStatus(deps ManageDeps, input manageInput) (fantasy.ToolResponse,
 	return fantasy.ToolResponse{Content: string(data)}, nil
 }
 
-func readCronFile(path string) []CronEntry {
-	return ReadCronFilePublic(path)
-}
-
-func writeCronFile(path string, entries []CronEntry) error {
-	return WriteCronFilePublic(path, entries)
-}
-
-// ReadCronFilePublic reads and parses the cron.yaml file.
-func ReadCronFilePublic(path string) []CronEntry {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var cfg CronConfig
-	yaml.Unmarshal(data, &cfg)
-	return cfg.Entries
-}
-
-// WriteCronFilePublic writes cron entries to the cron.yaml file.
-func WriteCronFilePublic(path string, entries []CronEntry) error {
-	cfg := CronConfig{Entries: entries}
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
 
 // --- Heartbeat handlers ---
 

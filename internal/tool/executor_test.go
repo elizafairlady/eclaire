@@ -49,6 +49,52 @@ func TestExecutorRunTimeout(t *testing.T) {
 	}
 }
 
+func TestExecutorBackstopTimeout(t *testing.T) {
+	e := &ShellExecutor{}
+	e.SetPolicy(&CommandPolicy{
+		MaxCommandLen:  DefaultMaxCommandLen,
+		MaxOutputBytes: DefaultMaxOutputBytes,
+		MaxTimeout:     1, // 1 second backstop
+	})
+
+	// No deadline on context — backstop should kick in
+	ctx := context.Background()
+	start := time.Now()
+	r := e.Run(ctx, "sleep 30", "")
+	elapsed := time.Since(start)
+
+	if r.Err == nil {
+		t.Fatal("expected timeout error from backstop")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("backstop took too long: %v (expected ~1s)", elapsed)
+	}
+}
+
+func TestExecutorBackstopSkippedWhenDeadlineExists(t *testing.T) {
+	e := &ShellExecutor{}
+	e.SetPolicy(&CommandPolicy{
+		MaxCommandLen:  DefaultMaxCommandLen,
+		MaxOutputBytes: DefaultMaxOutputBytes,
+		MaxTimeout:     60, // large backstop
+	})
+
+	// Caller sets a tight deadline — backstop should NOT override it
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	r := e.Run(ctx, "sleep 30", "")
+	elapsed := time.Since(start)
+
+	if r.Err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("caller deadline not respected: %v", elapsed)
+	}
+}
+
 func TestExecutorCountsExecutions(t *testing.T) {
 	e := &ShellExecutor{}
 	before := e.ExecCount()

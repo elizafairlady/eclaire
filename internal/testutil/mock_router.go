@@ -90,7 +90,6 @@ func NewTestEnv(dir string, model *MockModel) *TestEnv {
 	// Register eclaire_manage tool for self-improvement tests
 	agentsDir := dir + "/agents"
 	skillsDir := dir + "/skills"
-	cronPath := dir + "/cron.yaml"
 	os.MkdirAll(agentsDir, 0o700)
 	os.MkdirAll(skillsDir, 0o700)
 
@@ -100,8 +99,7 @@ func NewTestEnv(dir string, model *MockModel) *TestEnv {
 	toolReg.Register(tool.ManageTool(tool.ManageDeps{
 		AgentsDir: agentsDir,
 		SkillsDir: skillsDir,
-		CronPath:  cronPath,
-		Reload:    func() tool.ReloadResult { return tool.ReloadResult{} },
+		Reload: func() tool.ReloadResult { return tool.ReloadResult{} },
 		CronList:  func() []tool.CronEntry { return nil },
 		AgentList: func() []tool.AgentInfo { return nil },
 		JobAdd: func(name, scheduleKind, scheduleValue, agentID, prompt, sessionTarget string, deleteAfterRun *bool, contextMessages string) (tool.JobInfo, error) {

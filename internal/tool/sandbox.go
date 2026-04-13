@@ -13,6 +13,7 @@ type SandboxConfig struct {
 	WriteRoots     []string // directories with read-write access (workspace roots)
 	AllowNetwork   bool     // allow network access (default true — agents need git/curl)
 	AllowNewPID    bool     // new PID namespace (hides host processes)
+	ReadOnlyDirs   []string // system dirs to bind read-only (nil = use defaults)
 	ExtraReadOnly  []string // additional read-only bind mounts
 	ExtraReadWrite []string // additional read-write bind mounts
 }
@@ -34,7 +35,13 @@ func init() {
 	bwrapPath, _ = exec.LookPath("bwrap")
 }
 
-// BwrapAvailable returns true if bubblewrap is installed.
+// SetBwrapPath overrides the auto-detected bwrap binary path.
+// Call this before any sandbox operations if the config specifies a custom path.
+func SetBwrapPath(path string) {
+	bwrapPath = path
+}
+
+// BwrapAvailable returns true if bubblewrap is installed or a custom path is set.
 func BwrapAvailable() bool {
 	return bwrapPath != ""
 }
@@ -63,7 +70,11 @@ func buildSandboxedCommand(cfg SandboxConfig, command, cwd string) (string, []st
 	}
 
 	// Bind system directories read-only
-	for _, dir := range systemReadOnlyDirs() {
+	roDirs := cfg.ReadOnlyDirs
+	if roDirs == nil {
+		roDirs = DefaultReadOnlyDirs()
+	}
+	for _, dir := range roDirs {
 		if info, err := os.Stat(dir); err == nil && info.IsDir() {
 			args = append(args, "--ro-bind", dir, dir)
 		}
@@ -122,9 +133,9 @@ func buildSandboxedCommand(cfg SandboxConfig, command, cwd string) (string, []st
 	return bwrapPath, args
 }
 
-// systemReadOnlyDirs returns system directories to bind read-only.
-// Only includes dirs that exist on the current system.
-func systemReadOnlyDirs() []string {
+// DefaultReadOnlyDirs returns the default system directories to bind read-only.
+// Used when SandboxConfig.ReadOnlyDirs is nil.
+func DefaultReadOnlyDirs() []string {
 	candidates := []string{
 		"/usr",
 		"/bin",
@@ -132,7 +143,7 @@ func systemReadOnlyDirs() []string {
 		"/lib",
 		"/lib64",
 		"/etc",
-		"/var/lib",    // package databases
+		"/var/lib",   // package databases
 		"/var/cache",  // package caches
 		"/run",        // runtime state (dbus, etc.)
 	}
@@ -144,7 +155,6 @@ func systemReadOnlyDirs() []string {
 	}
 	gopath := os.Getenv("GOPATH")
 	if gopath != "" {
-		// Go module cache needs read access
 		for _, p := range strings.Split(gopath, ":") {
 			candidates = append(candidates, p)
 		}

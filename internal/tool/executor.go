@@ -93,6 +93,7 @@ type ExecResult struct {
 
 // Run executes a shell command synchronously and returns its output.
 // This is the ONLY place in the codebase where exec.CommandContext should be called.
+// If the caller's context has no deadline and MaxTimeout > 0, a backstop timeout is applied.
 func (e *ShellExecutor) Run(ctx context.Context, command, cwd string) ExecResult {
 	policy := e.effectivePolicy()
 
@@ -106,6 +107,14 @@ func (e *ShellExecutor) Run(ctx context.Context, command, cwd string) ExecResult
 		err := fmt.Errorf("rate limit exceeded: max %d commands per minute", e.effectiveLimiter().limit)
 		e.logAudit(command, cwd, "rate_limited", "", 0)
 		return ExecResult{Err: err, ExitCode: 1}
+	}
+
+	// Backstop timeout: if the caller hasn't set a deadline and the policy has a max,
+	// enforce it here so no command can hang forever.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && policy.MaxTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(policy.MaxTimeout)*time.Second)
+		defer cancel()
 	}
 
 	e.execCount.Add(1)

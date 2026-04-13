@@ -18,29 +18,61 @@ func newTestManageDeps(t *testing.T) (ManageDeps, string) {
 	agentsDir := filepath.Join(dir, "agents")
 	skillsDir := filepath.Join(dir, "skills")
 	flowsDir := filepath.Join(dir, "flows")
-	cronPath := filepath.Join(dir, "cron.yaml")
 	os.MkdirAll(agentsDir, 0o755)
 	os.MkdirAll(skillsDir, 0o755)
 	os.MkdirAll(flowsDir, 0o755)
 
-	// In-memory flow run state for tests
+	// In-memory job + flow run state for tests
 	flowRuns := make(map[string]*FlowRunInfo)
+	var jobs []JobInfo
 
 	reloadCalled := false
 	deps := ManageDeps{
 		AgentsDir: agentsDir,
 		SkillsDir: skillsDir,
 		FlowsDir:  flowsDir,
-		CronPath:  cronPath,
 		Reload: func() ReloadResult {
 			reloadCalled = true
 			_ = reloadCalled
-			return ReloadResult{AgentsLoaded: 1, CronEntries: 0}
+			return ReloadResult{AgentsLoaded: 1, JobCount: len(jobs)}
 		},
 		CronList: func() []CronEntry {
-			entries := readCronFile(cronPath)
-			return entries
+			var out []CronEntry
+			for _, j := range jobs {
+				out = append(out, CronEntry{ID: j.ID, Schedule: j.Schedule, AgentID: j.AgentID, Prompt: j.Prompt, Enabled: j.Enabled})
+			}
+			return out
 		},
+		JobAdd: func(name, scheduleKind, scheduleValue, agentID, prompt, sessionTarget string, deleteAfterRun *bool, contextMessages string) (JobInfo, error) {
+			info := JobInfo{
+				ID:           name + "-id",
+				Name:         name,
+				ScheduleKind: scheduleKind,
+				Schedule:     scheduleValue,
+				AgentID:      agentID,
+				Prompt:       prompt,
+				Enabled:      true,
+			}
+			if deleteAfterRun != nil {
+				info.DeleteAfterRun = *deleteAfterRun
+			} else if scheduleKind == "at" {
+				info.DeleteAfterRun = true
+			}
+			jobs = append(jobs, info)
+			return info, nil
+		},
+		JobRemove: func(id string) error {
+			for i, j := range jobs {
+				if j.ID == id {
+					jobs = append(jobs[:i], jobs[i+1:]...)
+					return nil
+				}
+			}
+			return fmt.Errorf("job %q not found", id)
+		},
+		JobList: func() []JobInfo { return jobs },
+		JobRun:  func(ctx context.Context, id string) error { return nil },
+		JobRuns: func(id string) []JobRunLogEntry { return nil },
 		AgentList: func() []AgentInfo {
 			return []AgentInfo{
 				{ID: "orchestrator", Name: "Claire", Role: "simple", BuiltIn: true},
@@ -167,15 +199,13 @@ func TestManageCronAdd(t *testing.T) {
 		t.Errorf("unexpected response: %s", resp.Content)
 	}
 
-	// Verify cron.yaml
-	data, _ := os.ReadFile(deps.CronPath)
-	var cfg CronConfig
-	yaml.Unmarshal(data, &cfg)
-	if len(cfg.Entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(cfg.Entries))
+	// Verify via CronList (reads from job store)
+	entries := deps.CronList()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
-	if cfg.Entries[0].ID != "disk-check" {
-		t.Errorf("entry ID = %q", cfg.Entries[0].ID)
+	if entries[0].AgentID != "sysadmin" {
+		t.Errorf("agent = %q, want sysadmin", entries[0].AgentID)
 	}
 }
 
@@ -183,20 +213,26 @@ func TestManageCronRemove(t *testing.T) {
 	deps, _ := newTestManageDeps(t)
 
 	// Add first
-	callManage(t, deps, `{"operation":"cron_add","cron_id":"to-remove","cron_schedule":"0 9 * * *","cron_agent":"orchestrator","cron_prompt":"Morning check"}`)
+	resp := callManage(t, deps, `{"operation":"cron_add","cron_id":"to-remove","cron_schedule":"0 9 * * *","cron_agent":"orchestrator","cron_prompt":"Morning check"}`)
+	if resp.IsError {
+		t.Fatalf("cron_add error: %s", resp.Content)
+	}
 
-	// Remove
-	resp := callManage(t, deps, `{"operation":"cron_remove","cron_id":"to-remove"}`)
+	// Extract the job ID from the response to remove it
+	entries := deps.CronList()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry after add, got %d", len(entries))
+	}
+
+	// Remove by the cron ID (handleCronRemove tries "cron-<id>" prefix then bare)
+	resp = callManage(t, deps, fmt.Sprintf(`{"operation":"cron_remove","cron_id":"%s"}`, entries[0].ID))
 	if !strings.Contains(resp.Content, "Removed") {
 		t.Errorf("unexpected response: %s", resp.Content)
 	}
 
 	// Verify empty
-	data, _ := os.ReadFile(deps.CronPath)
-	var cfg CronConfig
-	yaml.Unmarshal(data, &cfg)
-	if len(cfg.Entries) != 0 {
-		t.Errorf("expected 0 entries after remove, got %d", len(cfg.Entries))
+	if remaining := deps.CronList(); len(remaining) != 0 {
+		t.Errorf("expected 0 entries after remove, got %d", len(remaining))
 	}
 }
 
@@ -563,7 +599,7 @@ func TestManageJobRuns_Empty(t *testing.T) {
 
 func TestManageJobAdd_NotAvailable(t *testing.T) {
 	deps, _ := newTestManageDeps(t)
-	// JobAdd is nil
+	deps.JobAdd = nil // explicitly nil to test unavailable path
 
 	resp := callManage(t, deps, `{
 		"operation": "job_add",

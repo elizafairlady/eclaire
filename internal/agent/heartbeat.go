@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -216,47 +215,6 @@ func (e *JobExecutor) RunBootIfNeeded(ctx context.Context, workspaces *Workspace
 	workspaces.MarkBootRan()
 }
 
-// MigrateLegacyCron reads legacy cron.yaml entries and creates corresponding
-// "cron" jobs in the store. Returns the number of entries migrated.
-func (e *JobExecutor) MigrateLegacyCron(cronPath string) int {
-	entries, err := readLegacyCronFile(cronPath)
-	if err != nil || len(entries) == 0 {
-		return 0
-	}
-
-	migrated := 0
-	for _, entry := range entries {
-		if !entry.Enabled {
-			continue
-		}
-		id := "cron-" + entry.ID
-		if _, exists := e.store.Get(id); exists {
-			continue
-		}
-
-		j := Job{
-			ID:   id,
-			Name: "cron: " + entry.ID,
-			Schedule: JobSchedule{
-				Kind: ScheduleCron,
-				Expr: entry.Schedule,
-			},
-			AgentID:        entry.AgentID,
-			Prompt:         entry.Prompt,
-			SessionTarget:  "isolated",
-			Enabled:        true,
-			DeleteAfterRun: false,
-		}
-		if _, err := e.store.Add(j); err != nil {
-			e.logger.Warn("failed to migrate cron entry", "id", entry.ID, "err", err)
-		} else {
-			e.logger.Info("migrated cron entry to job", "id", id, "schedule", entry.Schedule)
-			migrated++
-		}
-	}
-
-	return migrated
-}
 
 // HeartbeatTaskList returns info for all heartbeat jobs.
 func (e *JobExecutor) HeartbeatTaskList() []HeartbeatTaskInfo {
@@ -308,27 +266,3 @@ func (e *JobExecutor) publishHeartbeatEvents(j Job, duration time.Duration, errS
 	})
 }
 
-// legacyCronEntry is used only for migrating cron.yaml.
-type legacyCronEntry struct {
-	ID       string `yaml:"id"`
-	Schedule string `yaml:"schedule"`
-	AgentID  string `yaml:"agent_id"`
-	Prompt   string `yaml:"prompt"`
-	Enabled  bool   `yaml:"enabled"`
-}
-
-type legacyCronConfig struct {
-	Entries []legacyCronEntry `yaml:"entries"`
-}
-
-func readLegacyCronFile(path string) ([]legacyCronEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var cfg legacyCronConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-	return cfg.Entries, nil
-}

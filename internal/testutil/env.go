@@ -37,7 +37,7 @@ func NewLiveTestEnv(t *testing.T, dir string) *TestEnv {
 	agentsDir := dir + "/agents"
 	skillsDir := dir + "/skills"
 	workspaceDir := dir + "/workspace"
-	cronPath := dir + "/cron.yaml"
+
 
 	os.MkdirAll(sessionDir, 0o700)
 	os.MkdirAll(agentsDir, 0o700)
@@ -145,8 +145,7 @@ func NewLiveTestEnv(t *testing.T, dir string) *TestEnv {
 	toolReg.Register(tool.ManageTool(tool.ManageDeps{
 		AgentsDir: agentsDir,
 		SkillsDir: skillsDir,
-		CronPath:  cronPath,
-		Reload:    func() tool.ReloadResult { return tool.ReloadResult{} },
+		Reload: func() tool.ReloadResult { return tool.ReloadResult{} },
 		CronList:  func() []tool.CronEntry { return nil },
 		AgentList: func() []tool.AgentInfo {
 			infos := registry.All()

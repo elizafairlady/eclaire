@@ -109,7 +109,6 @@ var agentCreateCmd = &cobra.Command{
 			AgentsDir: cfg.AgentsDir(),
 			SkillsDir: cfg.SkillsDir(),
 			FlowsDir:  cfg.FlowsDir(),
-			CronPath:  cfg.CronPath(),
 			Reload:    func() tool.ReloadResult { return tool.ReloadResult{} },
 			CronList:  func() []tool.CronEntry { return nil },
 			AgentList: func() []tool.AgentInfo { return nil },

@@ -122,10 +122,19 @@ type Runner struct {
 	HookRunner    *hook.Runner
 	PermChecker   *tool.PermissionChecker
 	Approver      tool.Approver
+	Executor      *tool.ShellExecutor // injectable shell executor (nil falls back to tool.DefaultExecutor)
 	WorkspaceRoot string
 	EclaireDir    string
 	SystemEvents  *SystemEventQueue
 	flushState    *memoryFlushState
+}
+
+// shellExecutor returns the configured ShellExecutor, falling back to the global default.
+func (r *Runner) shellExecutor() *tool.ShellExecutor {
+	if r.Executor != nil {
+		return r.Executor
+	}
+	return tool.DefaultExecutor
 }
 
 // RunConfig configures a single agent run.
@@ -280,6 +289,7 @@ func (r *Runner) Run(ctx context.Context, cfg RunConfig, emit func(StreamEvent) 
 		Approver:       r.Approver,
 		PermMode:       cfg.PermissionMode,
 		WorkspaceRoots: roots,
+		Executor:       r.Executor,
 		AgentID:        cfg.AgentID,
 		Logger:         r.Logger,
 		ContextWindow:  contextWindow,

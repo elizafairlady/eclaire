@@ -9,8 +9,8 @@ func TestPermissionCheckerReadOnly(t *testing.T) {
 	r.Register(ReadTool())
 	pc := NewPermissionChecker(r)
 
-	if pc.Check("any", "read", nil) != DecisionAllow {
-		t.Error("ReadOnly tools should be auto-allowed")
+	if pc.CheckWithMode("any", "read", nil, PermissionWriteOnly) != DecisionAllow {
+		t.Error("ReadOnly tools should be auto-allowed in WriteOnly mode")
 	}
 }
 
@@ -19,9 +19,9 @@ func TestPermissionCheckerDangerousInAllowMode(t *testing.T) {
 	r.Register(ShellTool())
 	pc := NewPermissionChecker(r)
 
-	// In allow mode (default), dangerous tools are auto-allowed
-	if pc.Check("agent1", "shell", nil) != DecisionAllow {
-		t.Error("Dangerous tools should be auto-allowed in default PermissionAllow mode")
+	// In PermissionAllow mode, dangerous tools are auto-allowed
+	if pc.CheckWithMode("agent1", "shell", nil, PermissionAllow) != DecisionAllow {
+		t.Error("Dangerous tools should be auto-allowed in PermissionAllow mode")
 	}
 }
 
@@ -32,9 +32,9 @@ func TestPermissionCheckerDifferentAgents(t *testing.T) {
 
 	pc.Approve("agent1", "shell")
 
-	// In allow mode, all agents pass
-	if pc.Check("agent2", "shell", nil) != DecisionAllow {
-		t.Error("should be allowed in default mode")
+	// In PermissionAllow mode, all agents pass
+	if pc.CheckWithMode("agent2", "shell", nil, PermissionAllow) != DecisionAllow {
+		t.Error("should be allowed in PermissionAllow mode")
 	}
 }
 
@@ -43,12 +43,12 @@ func TestPermissionCheckerDangerousWithDangerousParams(t *testing.T) {
 	r.Register(ShellTool())
 	pc := NewPermissionChecker(r)
 
-	// Shell is TrustDangerous. In allow mode, everything is allowed
-	if pc.Check("agent1", "shell", nil) != DecisionAllow {
-		t.Error("dangerous tool should be allowed in default mode")
+	// Shell is TrustDangerous. In PermissionAllow mode, everything is allowed
+	if pc.CheckWithMode("agent1", "shell", nil, PermissionAllow) != DecisionAllow {
+		t.Error("dangerous tool should be allowed in PermissionAllow mode")
 	}
 	params := map[string]any{"command": "rm -rf /"}
-	if pc.Check("agent1", "shell", params) != DecisionAllow {
+	if pc.CheckWithMode("agent1", "shell", params, PermissionAllow) != DecisionAllow {
 		t.Error("in PermissionAllow mode, even dangerous params are allowed")
 	}
 
@@ -162,6 +162,34 @@ func TestWorkspaceBoundaryNoPath(t *testing.T) {
 	ok, _ := CheckWorkspaceBoundary("write", `{"content":"hello"}`, roots)
 	if !ok {
 		t.Error("no path field should pass through")
+	}
+}
+
+func TestAddSubcommandBinaries(t *testing.T) {
+	// Custom binary should not have subcommands by default
+	if hasSubcommands("mytool") {
+		t.Fatal("mytool should not have subcommands by default")
+	}
+	AddSubcommandBinaries([]string{"mytool"})
+	if !hasSubcommands("mytool") {
+		t.Error("mytool should have subcommands after AddSubcommandBinaries")
+	}
+	// Cleanup
+	delete(subcommandBinaries, "mytool")
+}
+
+func TestHasSubcommandsDefaults(t *testing.T) {
+	// Verify some defaults are present
+	for _, bin := range []string{"go", "git", "docker", "npm", "cargo", "kubectl"} {
+		if !hasSubcommands(bin) {
+			t.Errorf("%q should have subcommands", bin)
+		}
+	}
+	// And some that should not
+	for _, bin := range []string{"echo", "cat", "grep", "ls"} {
+		if hasSubcommands(bin) {
+			t.Errorf("%q should NOT have subcommands", bin)
+		}
 	}
 }
 

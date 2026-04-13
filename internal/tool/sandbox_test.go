@@ -108,6 +108,86 @@ func TestSandboxBlocksWriteOutsideRoot(t *testing.T) {
 	_ = r // exit code may vary
 }
 
+func TestDefaultReadOnlyDirs(t *testing.T) {
+	dirs := DefaultReadOnlyDirs()
+	if len(dirs) == 0 {
+		t.Fatal("DefaultReadOnlyDirs should return at least some candidates")
+	}
+	// Must include /usr
+	found := false
+	for _, d := range dirs {
+		if d == "/usr" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("DefaultReadOnlyDirs should include /usr")
+	}
+}
+
+func TestCustomReadOnlyDirs(t *testing.T) {
+	if !BwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	dir := t.TempDir()
+	cfg := SandboxConfig{
+		Enabled:      true,
+		WriteRoots:   []string{dir},
+		AllowNetwork: true,
+		ReadOnlyDirs: []string{"/usr", "/bin"}, // custom, smaller list
+	}
+
+	_, args := buildSandboxedCommand(cfg, "echo test", dir)
+	argStr := strings.Join(args, " ")
+
+	// Should bind /usr but NOT /etc (since we overrode the defaults)
+	if !strings.Contains(argStr, "--ro-bind /usr /usr") {
+		t.Error("should bind /usr from custom list")
+	}
+	// /etc is in the default list but not our custom list
+	if strings.Contains(argStr, "--ro-bind /etc /etc") {
+		t.Error("should NOT bind /etc when using custom ReadOnlyDirs")
+	}
+}
+
+func TestExtraMountsWired(t *testing.T) {
+	if !BwrapAvailable() {
+		t.Skip("bwrap not available")
+	}
+
+	dir := t.TempDir()
+	extraDir := t.TempDir()
+	cfg := SandboxConfig{
+		Enabled:        true,
+		WriteRoots:     []string{dir},
+		AllowNetwork:   true,
+		ExtraReadOnly:  []string{extraDir},
+		ExtraReadWrite: []string{dir}, // same as write root for this test
+	}
+
+	_, args := buildSandboxedCommand(cfg, "echo test", dir)
+	argStr := strings.Join(args, " ")
+
+	if !strings.Contains(argStr, "--ro-bind "+extraDir+" "+extraDir) {
+		t.Errorf("should bind extra read-only dir, args: %s", argStr)
+	}
+}
+
+func TestSetBwrapPath(t *testing.T) {
+	old := bwrapPath
+	defer func() { bwrapPath = old }()
+
+	SetBwrapPath("/custom/path/to/bwrap")
+	if bwrapPath != "/custom/path/to/bwrap" {
+		t.Errorf("SetBwrapPath didn't take effect: %q", bwrapPath)
+	}
+	if !BwrapAvailable() {
+		t.Error("BwrapAvailable should return true after SetBwrapPath")
+	}
+}
+
 func TestSandboxAllowsWriteInsideRoot(t *testing.T) {
 	if !BwrapAvailable() {
 		t.Skip("bwrap not available")

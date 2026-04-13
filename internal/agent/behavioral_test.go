@@ -671,7 +671,7 @@ func TestBehavior_ClaireCreatesSkill(t *testing.T) {
 	}
 }
 
-// Claire adds a cron entry using eclaire_manage.
+// Claire adds a cron entry using eclaire_manage — routes through unified job store.
 func TestBehavior_ClaireManagesCron(t *testing.T) {
 	dir := t.TempDir()
 
@@ -698,14 +698,9 @@ func TestBehavior_ClaireManagesCron(t *testing.T) {
 		t.Error("should use eclaire_manage tool")
 	}
 
-	// cron.yaml should exist
-	cronPath := filepath.Join(dir, "cron.yaml")
-	data, err := os.ReadFile(cronPath)
-	if err != nil {
-		t.Fatalf("cron.yaml should exist: %v", err)
-	}
-	if !strings.Contains(string(data), "disk-check") {
-		t.Error("cron.yaml should contain the disk-check entry")
+	// Job should exist in the unified store (cron_add routes through job_add)
+	if env.JobStore.Count() == 0 {
+		t.Error("job store should have at least one entry after cron_add")
 	}
 }
 
